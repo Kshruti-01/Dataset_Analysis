@@ -1,0 +1,8 @@
+(venv) PS C:\Users\OneDrive\Desktop\Project\Dataset_Analysis> python app.py
+Traceback (most recent call last):
+  File "C:\Users\850085869\OneDrive - Genpact\Desktop\Project\Dataset_Analysis\app.py", line 5, in <module>
+    from analysis.cleaner import DataCleaner
+  File "C:\Users\850085869\OneDrive - Genpact\Desktop\Project\Dataset_Analysis\analysis\cleaner.py", line 31
+    df[col].mode().[0]
+                   ^
+SyntaxError: invalid s
