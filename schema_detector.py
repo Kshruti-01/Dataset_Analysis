@@ -1,5 +1,5 @@
 import pandas as pd
-import re
+import numpy as np
 
 
 class SchemaDetector:
@@ -12,57 +12,125 @@ class SchemaDetector:
 
         series = self.df[column]
 
-        col_name = str(column).lower()
+        series = series.dropna()
 
-        # ID detection
+        if len(series) == 0:
 
-        if (
-            "id" in col_name
-            or "code" in col_name
+            return "unknown"
+
+        string_series = series.astype(str)
+
+        total_rows = len(series)
+
+        unique_count = series.nunique()
+
+        unique_ratio = (
+            unique_count / total_rows
+        )
+
+        # Boolean
+
+        unique_values = {
+
+            str(v).strip().lower()
+
+            for v in string_series.unique()
+        }
+
+        boolean_values = {
+
+            "true",
+            "false",
+            "yes",
+            "no",
+            "0",
+            "1"
+        }
+
+        if unique_values.issubset(
+            boolean_values
         ):
 
-            return "identifier"
-
-        # Date detection
-
-        try:
-
-            converted = pd.to_datetime(
-                series,
-                errors="coerce"
-            )
-
-            if converted.notna().mean() > 0.8:
-
-                return "date"
-
-        except:
-
-            pass
+            return "boolean"
 
         # Numeric
 
-        numeric = pd.to_numeric(
-            series,
+        numeric_series = pd.to_numeric(
+
+            string_series
+            .str.replace(
+                r'[$₹€,£,%]',
+                '',
+                regex=True
+            )
+            .str.replace(
+                ',',
+                '',
+                regex=False
+            ),
+
             errors="coerce"
         )
 
-        if numeric.notna().mean() > 0.8:
+        numeric_ratio = (
+
+            numeric_series.notna()
+            .sum()
+
+            /
+
+            total_rows
+        )
+
+        if numeric_ratio > 0.9:
+
+            if unique_ratio > 0.98:
+
+                return "identifier"
 
             return "numeric"
 
-        # Low cardinality
+        # Date
 
-        unique_ratio = (
-            series.nunique()
-            / len(series)
+        date_series = pd.to_datetime(
+
+            series,
+
+            errors="coerce"
         )
 
-        if unique_ratio < 0.2:
+        date_ratio = (
+
+            date_series.notna()
+            .sum()
+
+            /
+
+            total_rows
+        )
+
+        if date_ratio > 0.9:
+
+            return "date"
+
+        # Categorical
+
+        if unique_ratio < 0.3:
 
             return "categorical"
 
-        return "text"
+        avg_len = (
+
+            string_series
+            .str.len()
+            .mean()
+        )
+
+        if avg_len > 30:
+
+            return "text"
+
+        return "categorical"
 
     def detect_schema(self):
 
@@ -70,8 +138,9 @@ class SchemaDetector:
 
         for col in self.df.columns:
 
-            schema[col] = self.classify_column(
-                col
+            schema[col] = (
+
+                self.classify_column(col)
             )
 
         return schema
