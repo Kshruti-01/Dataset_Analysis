@@ -1,12 +1,20 @@
 import pandas as pd
-import numpy as np
 
 
 class RelationshipEngine:
 
-    def __init__(self, df, schema):
+    def __init__(
+
+        self,
+
+        df,
+
+        schema
+
+    ):
 
         self.df = df
+
         self.schema = schema
 
     def get_numeric_columns(self):
@@ -15,16 +23,19 @@ class RelationshipEngine:
 
             col
 
-            for col, col_type
+            for col, dtype
 
             in self.schema.items()
 
-            if col_type == "numeric"
+            if dtype == "numeric"
         ]
 
-    def correlation_analysis(self):
+    def correlation_matrix(self):
 
-        numeric_cols = self.get_numeric_columns()
+        numeric_cols = (
+
+            self.get_numeric_columns()
+        )
 
         if len(numeric_cols) < 2:
 
@@ -33,42 +44,51 @@ class RelationshipEngine:
         return (
 
             self.df[numeric_cols]
-            .corr(method='pearson')
+            .corr()
         )
 
-    def strong_relationships(self):
+    def strong_relationships(
 
-        corr_matrix = self.correlation_analysis()
+        self,
 
-        if corr_matrix is None:
+        threshold=0.7
+
+    ):
+
+        corr = (
+
+            self.correlation_matrix()
+        )
+
+        if corr is None:
 
             return []
 
         relationships = []
 
-        for col1 in corr_matrix.columns:
+        for col1 in corr.columns:
 
-            for col2 in corr_matrix.columns:
+            for col2 in corr.columns:
 
                 if col1 >= col2:
 
                     continue
 
-                corr = corr_matrix.loc[
+                value = corr.loc[
                     col1,
                     col2
                 ]
 
-                if abs(corr) >= 0.7:
+                if abs(value) >= threshold:
 
                     relationships.append({
 
-                        "column_1": col1,
-                        "column_2": col2,
-                        "correlation": round(
-                            corr,
-                            2
-                        )
+                        "Column1": col1,
+
+                        "Column2": col2,
+
+                        "Correlation":
+                        round(value, 2)
                     })
 
         return relationships
