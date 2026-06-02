@@ -1,35 +1,65 @@
-import numpy as np
-
 class InsightGenerator:
-    def __init__(self, df):
+
+    def __init__(
+
+        self,
+
+        df,
+
+        schema,
+
+        relationships
+
+    ):
+
         self.df = df
 
-    def generate_insights(self):
+        self.schema = schema
+
+        self.relationships = relationships
+
+    def generate(self):
+
         insights = []
-        numeric_cols = (self.df.select_dtypes(include=np.number).columns)
 
-        # ---------------- BASIC STATS ---------------- #
+        numeric_cols = [
+
+            c
+
+            for c, t
+
+            in self.schema.items()
+
+            if t == "numeric"
+        ]
+
         for col in numeric_cols:
-            try:
-                avg = round(self.df[col].mean(),2)
-                max_value = self.df[col].max()
-                min_value = self.df[col].min()
 
-                insights.append(f"Average {col} is {avg}")
-                insights.append(f"Highest {col} is {max_value}")
-                insights.append(f"Lowest {col} is {min_value}")
+            avg = round(
 
-            except:
-                pass
-        # ---------------- CORRELATION INSIGHTS ---------------- #
-        if len(numeric_cols) >= 2:
-            corr_matrix = (self.df[numeric_cols].corr())
-            for col1 in corr_matrix.columns:
-                for col2 in corr_matrix.columns:
-                    if col1 != col2:
-                        corr = corr_matrix.loc[col1,col2]
-                        if corr > 0.75:
-                            insights.append(f"Strong positive relationship between {col1} and {col2}")
-                        elif corr < -0.75:
-                            insights.append(f"Strong negative relationship between {col1} and {col2}")
-        return list(set(insights))
+                self.df[col].mean(),
+
+                2
+            )
+
+            insights.append(
+
+                f"Average {col} is {avg}"
+            )
+
+            insights.append(
+
+                f"Maximum {col} is {self.df[col].max()}"
+            )
+
+        for rel in self.relationships:
+
+            insights.append(
+
+                f"{rel['column_1']} and "
+                f"{rel['column_2']} have "
+                f"a correlation of "
+                f"{rel['correlation']}"
+            )
+
+        return insights
