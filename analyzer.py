@@ -9,83 +9,35 @@ class DataAnalyzer:
         self.df = df
         self.schema = schema
 
-    # ---------------------------
-    # Column Groups
-    # ---------------------------
-
-    def get_numeric_columns(self):
-
-        return [
-
-            col
-
-            for col, col_type
-
-            in self.schema.items()
-
-            if col_type == "numeric"
-        ]
-
-    def get_categorical_columns(self):
-
-        return [
-
-            col
-
-            for col, col_type
-
-            in self.schema.items()
-
-            if col_type == "categorical"
-        ]
-
-    def get_date_columns(self):
-
-        return [
-
-            col
-
-            for col, col_type
-
-            in self.schema.items()
-
-            if col_type == "date"
-        ]
-
-    # ---------------------------
-    # Dataset Summary
-    # ---------------------------
-
     def dataset_summary(self):
 
         return {
 
-            "rows": len(self.df),
+            "Rows": len(self.df),
 
-            "columns": len(self.df.columns),
+            "Columns": len(self.df.columns),
 
-            "missing_values": int(
-                self.df.isnull().sum().sum()
-            ),
+            "Missing Values":
+            int(self.df.isnull().sum().sum()),
 
-            "duplicates": int(
-                self.df.duplicated().sum()
-            )
+            "Duplicate Rows":
+            int(self.df.duplicated().sum())
         }
-
-    # ---------------------------
-    # Numeric Analysis
-    # ---------------------------
 
     def numeric_analysis(self):
 
-        numeric_cols = self.get_numeric_columns()
-
-        if not numeric_cols:
-
-            return {}
-
         results = {}
+
+        numeric_cols = [
+
+            col
+
+            for col, dtype
+
+            in self.schema.items()
+
+            if dtype == "numeric"
+        ]
 
         for col in numeric_cols:
 
@@ -93,112 +45,105 @@ class DataAnalyzer:
 
                 results[col] = {
 
-                    "mean": round(
+                    "Mean":
+                    round(
                         self.df[col].mean(),
                         2
                     ),
 
-                    "median": round(
+                    "Median":
+                    round(
                         self.df[col].median(),
                         2
                     ),
 
-                    "minimum": round(
+                    "Min":
+                    round(
                         self.df[col].min(),
                         2
                     ),
 
-                    "maximum": round(
+                    "Max":
+                    round(
                         self.df[col].max(),
                         2
                     ),
 
-                    "std_dev": round(
+                    "Std":
+                    round(
                         self.df[col].std(),
                         2
                     ),
 
-                    "variance": round(
-                        self.df[col].var(),
-                        2
-                    ),
-
-                    "skewness": round(
-                        self.df[col].skew(),
-                        2
+                    "Missing":
+                    int(
+                        self.df[col]
+                        .isnull()
+                        .sum()
                     )
                 }
 
-            except Exception:
+            except:
 
                 continue
 
         return results
 
-    # ---------------------------
-    # Categorical Analysis
-    # ---------------------------
-
     def categorical_analysis(self):
 
-        categorical_cols = (
-            self.get_categorical_columns()
-        )
-
         results = {}
+
+        categorical_cols = [
+
+            col
+
+            for col, dtype
+
+            in self.schema.items()
+
+            if dtype == "categorical"
+        ]
 
         for col in categorical_cols:
 
             try:
 
+                mode = self.df[col].mode()
+
                 results[col] = {
 
-                    "unique_values": int(
-                        self.df[col].nunique()
+                    "Unique Values":
+                    int(
+                        self.df[col]
+                        .nunique()
                     ),
 
-                    "top_category":
-                    self.df[col]
-                    .mode()[0]
-
-                    if not self.df[col]
-                    .mode()
-                    .empty
-
-                    else None,
-
-                    "top_frequency":
-
-                    int(
-
-                        self.df[col]
-                        .value_counts()
-                        .iloc[0]
-
-                    )
-
-                    if not self.df[col]
-                    .value_counts()
-                    .empty
-
-                    else 0
+                    "Top Category":
+                    mode.iloc[0]
+                    if not mode.empty
+                    else None
                 }
 
-            except Exception:
+            except:
 
                 continue
 
         return results
 
-    # ---------------------------
-    # Date Analysis
-    # ---------------------------
-
     def date_analysis(self):
 
-        date_cols = self.get_date_columns()
-
         results = {}
+
+        date_cols = [
+
+            col
+
+            for col, dtype
+
+            in self.schema.items()
+
+            if dtype == "date"
+        ]
 
         for col in date_cols:
 
@@ -206,64 +151,45 @@ class DataAnalyzer:
 
                 results[col] = {
 
-                    "start_date":
-
+                    "Start":
                     str(
                         self.df[col].min()
                     ),
 
-                    "end_date":
-
+                    "End":
                     str(
                         self.df[col].max()
-                    ),
-
-                    "total_days":
-
-                    int(
-
-                        (
-                            self.df[col].max()
-
-                            -
-
-                            self.df[col].min()
-
-                        ).days
                     )
                 }
 
-            except Exception:
+            except:
 
                 continue
 
         return results
 
-    # ---------------------------
-    # Outlier Detection
-    # ---------------------------
+    def outlier_analysis(self):
 
-    def detect_outliers(self):
+        outliers = {}
 
-        numeric_cols = (
-            self.get_numeric_columns()
-        )
+        numeric_cols = [
 
-        outlier_report = {}
+            col
+
+            for col, dtype
+
+            in self.schema.items()
+
+            if dtype == "numeric"
+        ]
 
         for col in numeric_cols:
 
             try:
 
-                q1 = (
-                    self.df[col]
-                    .quantile(0.25)
-                )
+                q1 = self.df[col].quantile(0.25)
 
-                q3 = (
-                    self.df[col]
-                    .quantile(0.75)
-                )
+                q3 = self.df[col].quantile(0.75)
 
                 iqr = q3 - q1
 
@@ -271,63 +197,43 @@ class DataAnalyzer:
 
                 upper = q3 + 1.5 * iqr
 
-                outliers = self.df[
+                count = len(
 
-                    (self.df[col] < lower)
+                    self.df[
 
-                    |
+                        (self.df[col] < lower)
 
-                    (self.df[col] > upper)
+                        |
 
-                ]
+                        (self.df[col] > upper)
 
-                outlier_report[col] = {
+                    ]
+                )
 
-                    "outlier_count":
-                    len(outliers),
+                outliers[col] = count
 
-                    "percentage":
-                    round(
-
-                        len(outliers)
-
-                        /
-
-                        len(self.df)
-
-                        * 100,
-
-                        2
-
-                    )
-                }
-
-            except Exception:
+            except:
 
                 continue
 
-        return outlier_report
+        return outliers
 
-    # ---------------------------
-    # Full Analysis
-    # ---------------------------
-
-    def run_complete_analysis(self):
+    def run_analysis(self):
 
         return {
 
-            "dataset_summary":
+            "Dataset Summary":
             self.dataset_summary(),
 
-            "numeric_analysis":
+            "Numeric Analysis":
             self.numeric_analysis(),
 
-            "categorical_analysis":
+            "Categorical Analysis":
             self.categorical_analysis(),
 
-            "date_analysis":
+            "Date Analysis":
             self.date_analysis(),
 
-            "outliers":
-            self.detect_outliers()
+            "Outlier Analysis":
+            self.outlier_analysis()
         }
