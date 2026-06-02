@@ -1,44 +1,58 @@
 import pandas as pd
 import numpy as np
-import re
 
 
 class DataCleaner:
 
-    def __init__(self, df, schema):
+    def __init__(
+
+        self,
+
+        df,
+
+        schema
+
+    ):
 
         self.df = df.copy()
+
         self.schema = schema
 
     def remove_duplicates(self):
 
-        self.df = self.df.drop_duplicates()
-
-    def clean_column_names(self):
-
-        self.df.columns = (
-            self.df.columns
-            .astype(str)
-            .str.strip()
-            .str.replace("\n", " ")
+        self.df = (
+            self.df.drop_duplicates()
         )
 
-    def clean_currency_columns(self):
+    def remove_empty_columns(self):
 
-        for col, col_type in self.schema.items():
+        self.df = self.df.dropna(
+            axis=1,
+            how="all"
+        )
+
+    def clean_numeric_columns(self):
+
+        for col, col_type in (
+
+            self.schema.items()
+        ):
 
             if col_type != "numeric":
 
                 continue
 
             self.df[col] = (
+
                 self.df[col]
                 .astype(str)
+
                 .str.replace(
                     r'[$₹€,£,%]',
                     '',
                     regex=True
                 )
+
                 .str.replace(
                     ',',
                     '',
@@ -47,65 +61,97 @@ class DataCleaner:
             )
 
             self.df[col] = pd.to_numeric(
+
                 self.df[col],
-                errors='coerce'
+
+                errors="coerce"
             )
 
-    def clean_dates(self):
+    def clean_date_columns(self):
 
-        for col, col_type in self.schema.items():
+        for col, col_type in (
 
-            if col_type == "date":
+            self.schema.items()
+        ):
 
-                self.df[col] = pd.to_datetime(
-                    self.df[col],
-                    errors='coerce'
-                )
+            if col_type != "date":
+
+                continue
+
+            self.df[col] = pd.to_datetime(
+
+                self.df[col],
+
+                errors="coerce"
+            )
 
     def handle_missing_values(self):
 
         for col in self.df.columns:
 
             if pd.api.types.is_numeric_dtype(
+
                 self.df[col]
             ):
 
-                skew = self.df[col].skew()
+                skew = (
+
+                    self.df[col]
+                    .skew()
+                )
 
                 if abs(skew) > 1:
 
-                    self.df[col] = (
+                    fill_value = (
+
                         self.df[col]
-                        .fillna(
-                            self.df[col].median()
-                        )
+                        .median()
                     )
 
                 else:
 
-                    self.df[col] = (
+                    fill_value = (
+
                         self.df[col]
-                        .fillna(
-                            self.df[col].mean()
-                        )
+                        .mean()
                     )
+
+                self.df[col] = (
+
+                    self.df[col]
+                    .fillna(fill_value)
+                )
 
             else:
 
-                mode = self.df[col].mode()
+                mode = (
 
-                if len(mode):
+                    self.df[col]
+                    .mode()
+                )
+
+                if not mode.empty:
 
                     self.df[col] = (
+
                         self.df[col]
                         .fillna(mode[0])
                     )
 
-    def remove_empty_columns(self):
+    def clean_column_names(self):
 
-        self.df = self.df.dropna(
-            axis=1,
-            how='all'
+        self.df.columns = (
+
+            self.df.columns
+
+            .astype(str)
+
+            .str.strip()
+
+            .str.replace(
+                "\n",
+                " "
+            )
         )
 
     def clean(self):
@@ -116,9 +162,9 @@ class DataCleaner:
 
         self.remove_empty_columns()
 
-        self.clean_currency_columns()
+        self.clean_numeric_columns()
 
-        self.clean_dates()
+        self.clean_date_columns()
 
         self.handle_missing_values()
 
