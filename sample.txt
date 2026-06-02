@@ -1,10 +1,14 @@
-ModuleNotFoundError: No module named 'analysis.insight_generator'
-Traceback:
-File "C:\Users\850085869\OneDrive - Genpact\Desktop\Project\data_analysis_v2\venv\Lib\site-packages\streamlit\runtime\scriptrunner\exec_code.py", line 129, in exec_func_with_error_handling
-    result = func()
-             ^^^^^^
-File "C:\Users\850085869\OneDrive - Genpact\Desktop\Project\data_analysis_v2\venv\Lib\site-packages\streamlit\runtime\scriptrunner\script_runner.py", line 789, in code_to_exec
-    exec(code, module.__dict__)  # noqa: S102
-    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-File "C:\Users\850085869\OneDrive - Genpact\Desktop\Project\data_analysis_v2\app.py", line 10, in <module>
-    from analysis.insight_generator import InsightGenerator
+Detected Schema
+{
+"Employee_ID":"identifier"
+"Name":"text"
+"Age":"date"
+"Gender":"categorical"
+"Department":"text"
+"Exp_years":"date"
+"Salary":"date"
+"Performance_score":"date"
+"Projects_Completed":"date"
+"Work_mode":"categorical"
+"Monthly_Sales":"date"
+}
