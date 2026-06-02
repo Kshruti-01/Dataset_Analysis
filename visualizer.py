@@ -1,6 +1,4 @@
 import plotly.express as px
-import plotly.graph_objects as go
-import numpy as np
 
 
 class Visualizer:
@@ -9,135 +7,83 @@ class Visualizer:
 
         self.df = df
 
-    # Histogram
     def histogram(self, column):
 
-        fig = px.histogram(
+        return px.histogram(
+
             self.df,
+
             x=column,
-            nbins=20,
+
             title=f"Distribution of {column}"
         )
 
-        return fig
+    def scatter(self, x, y):
 
-    # Scatter Plot
-    def scatter_plot(self, x_col, y_col):
+        return px.scatter(
 
-        fig = px.scatter(
             self.df,
-            x=x_col,
-            y=y_col,
-            title=f"{x_col} vs {y_col}"
+
+            x=x,
+
+            y=y,
+
+            title=f"{x} vs {y}"
         )
 
-        return fig
-
-    # Bar Chart
-    def bar_chart(self, category_col, numeric_col):
+    def bar(self, category, value):
 
         grouped = (
+
             self.df
-            .groupby(category_col)[numeric_col]
+            .groupby(category)[value]
             .mean()
             .reset_index()
         )
 
-        fig = px.bar(
+        return px.bar(
+
             grouped,
-            x=category_col,
-            y=numeric_col,
-            title=f"{numeric_col} by {category_col}"
+
+            x=category,
+
+            y=value,
+
+            title=f"{value} by {category}"
         )
 
-        return fig
+    def line(self, date_col, value_col):
 
-    # Heatmap
-    def correlation_heatmap(self):
+        grouped = (
 
-        corr = (
             self.df
-            .select_dtypes(include=np.number)
-            .corr()
+            .groupby(date_col)[value_col]
+            .sum()
+            .reset_index()
         )
 
-        fig = px.imshow(
-            corr,
+        return px.line(
+
+            grouped,
+
+            x=date_col,
+
+            y=value_col,
+
+            title=f"{value_col} Trend"
+        )
+
+    def heatmap(self, corr_matrix):
+
+        if corr_matrix is None:
+
+            return None
+
+        return px.imshow(
+
+            corr_matrix,
+
             text_auto=True,
-            aspect="auto",
+
             title="Correlation Heatmap"
         )
-
-        return fig
-
-    # Automatic Graph Generation
-    def generate_automatic_graphs(self):
-
-        graphs = []
-
-        numeric_cols = list(
-            self.df.select_dtypes(
-                include=np.number
-            ).columns
-        )
-
-        categorical_cols = list(
-            self.df.select_dtypes(
-                include='object'
-            ).columns
-        )
-
-        MAX_GRAPHS = 10
-
-        # Histograms
-        for col in numeric_cols[:3]:
-
-            if len(graphs) >= MAX_GRAPHS:
-                return graphs
-
-            try:
-                graphs.append(
-                    self.histogram(col)
-                )
-            except:
-                pass
-
-        # Scatter plots
-        if len(numeric_cols) >= 2:
-
-            for i in range(
-                min(len(numeric_cols)-1, 3)
-            ):
-
-                if len(graphs) >= MAX_GRAPHS:
-                    return graphs
-
-                try:
-                    graphs.append(
-                        self.scatter_plot(
-                            numeric_cols[i],
-                            numeric_cols[i + 1]
-                        )
-                    )
-                except:
-                    pass
-
-        # Bar charts
-        for cat_col in categorical_cols[:2]:
-
-            for num_col in numeric_cols[:2]:
-
-                if len(graphs) >= MAX_GRAPHS:
-                    return graphs
-
-                try:
-                    graphs.append(
-                        self.bar_chart(
-                            cat_col,
-                            num_col
-                        )
-                    )
-                except:
-                    pass
-
-        return graphs
