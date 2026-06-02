@@ -3,12 +3,21 @@ import streamlit as st
 from analysis.loader import DatasetLoader
 from analysis.schema_detector import SchemaDetector
 from analysis.cleaner import DataCleaner
-from analysis.profiler import DatasetProfiler
-from analysis.relationship_engine import RelationshipEngine
-from analysis.recommendation_engine import RecommendationEngine
-from analysis.visualizer import Visualizer
-from analysis.insight_generator import InsightGenerator
 
+from analysis.analyzer import DataAnalyzer
+from analysis.relationship_engine import RelationshipEngine
+
+from analysis.recommendation_engine import (
+    RecommendationEngine
+)
+
+from analysis.visualizer import Visualizer
+
+from analysis.insight_generator import (
+    InsightGenerator
+)
+
+# ---------------------------------
 
 st.set_page_config(
 
@@ -18,209 +27,212 @@ st.set_page_config(
 )
 
 st.title(
-
     "📊 Smart Dataset Analysis Platform"
 )
 
+# ---------------------------------
+
 uploaded_file = st.file_uploader(
 
-    "Upload CSV / Excel",
+    "Upload CSV or Excel File",
 
     type=["csv", "xlsx", "xls"]
 )
 
+# ---------------------------------
+
 if uploaded_file:
 
-    # Load
+    try:
 
-    df = DatasetLoader.load_file(
+        # Load
 
-        uploaded_file
-    )
+        df = DatasetLoader.load_file(
+            uploaded_file
+        )
 
-    # Detect Schema
+        st.success(
+            "Dataset Loaded Successfully"
+        )
 
-    schema = SchemaDetector(
+        st.subheader("Dataset Preview")
 
-        df
-    ).detect_schema()
+        st.dataframe(df.head())
 
-    # Clean
+        # Schema Detection
 
-    df = DataCleaner(
+        schema = SchemaDetector(
+            df
+        ).detect_schema()
 
-        df,
+        # Cleaning
 
-        schema
-    ).clean()
-
-    # Profile
-
-    profiler = DatasetProfiler(df)
-
-    st.header(
-
-        "Dataset Profile"
-    )
-
-    st.json(
-
-        profiler.generate_profile()
-    )
-
-    st.metric(
-
-        "Quality Score",
-
-        profiler.quality_score()
-    )
-
-    st.header(
-
-        "Detected Schema"
-    )
-
-    st.json(schema)
-
-    # Relationships
-
-    relationship_engine = (
-
-        RelationshipEngine(
-
+        df = DataCleaner(
             df,
+            schema
+        ).clean()
 
+        # Analysis
+
+        analyzer = DataAnalyzer(
+            df,
             schema
         )
-    )
 
-    corr_matrix = (
+        analysis_results = (
+            analyzer.run_analysis()
+        )
 
-        relationship_engine
-        .correlation_analysis()
-    )
+        # Relationships
 
-    relationships = (
+        relationship_engine = (
+            RelationshipEngine(
+                df,
+                schema
+            )
+        )
 
-        relationship_engine
-        .strong_relationships()
-    )
+        correlation_matrix = (
+            relationship_engine
+            .correlation_matrix()
+        )
 
-    # Insights
+        relationships = (
+            relationship_engine
+            .strong_relationships()
+        )
 
-    insight_generator = (
+        # Insights
 
-        InsightGenerator(
+        insights = InsightGenerator(
 
             df,
 
             schema,
 
+            analysis_results,
+
             relationships
+
+        ).generate()
+
+        # ---------------------------------
+
+        st.header("Detected Schema")
+
+        st.json(schema)
+
+        # ---------------------------------
+
+        st.header("Dataset Analysis")
+
+        st.json(analysis_results)
+
+        # ---------------------------------
+
+        st.header("Insights")
+
+        for insight in insights:
+
+            st.success(insight)
+
+        # ---------------------------------
+
+        visualizer = Visualizer(df)
+
+        recommendation_engine = (
+            RecommendationEngine(
+                df,
+                schema
+            )
         )
-    )
 
-    st.header(
-
-        "Insights"
-    )
-
-    for insight in (
-
-        insight_generator
-        .generate()
-    ):
-
-        st.success(insight)
-
-    # Visuals
-
-    visualizer = Visualizer(df)
-
-    recommendation_engine = (
-
-        RecommendationEngine(
-
-            df,
-
-            schema
+        recommendations = (
+            recommendation_engine
+            .recommend()
         )
-    )
 
-    recommendations = (
+        st.header(
+            "Recommended Visualizations"
+        )
 
-        recommendation_engine
-        .recommend_visualizations()
-    )
+        graph_count = 0
 
-    st.header(
+        MAX_GRAPHS = 10
 
-        "Visualizations"
-    )
+        for rec in recommendations:
 
-    graph_count = 0
+            if graph_count >= MAX_GRAPHS:
+                break
 
-    for rec in recommendations:
+            try:
 
-        if graph_count >= 15:
+                if rec["type"] == "histogram":
 
-            break
+                    fig = visualizer.histogram(
+                        rec["column"]
+                    )
 
-        try:
+                elif rec["type"] == "scatter":
 
-            if rec["type"] == "histogram":
+                    fig = visualizer.scatter(
+                        rec["x"],
+                        rec["y"]
+                    )
 
-                fig = visualizer.histogram(
-                    rec["column"]
+                elif rec["type"] == "bar":
+
+                    fig = visualizer.bar(
+                        rec["category"],
+                        rec["value"]
+                    )
+
+                elif rec["type"] == "line":
+
+                    fig = visualizer.line(
+                        rec["date"],
+                        rec["value"]
+                    )
+
+                else:
+
+                    continue
+
+                st.plotly_chart(
+                    fig,
+                    use_container_width=True
                 )
 
-            elif rec["type"] == "scatter":
+                graph_count += 1
 
-                fig = visualizer.scatter(
-                    rec["x"],
-                    rec["y"]
-                )
-
-            elif rec["type"] == "bar":
-
-                fig = visualizer.bar(
-                    rec["category"],
-                    rec["value"]
-                )
-
-            elif rec["type"] == "line":
-
-                fig = visualizer.line(
-                    rec["date"],
-                    rec["value"]
-                )
-
-            else:
+            except Exception as e:
 
                 continue
 
+        # ---------------------------------
+
+        st.header("Correlation Heatmap")
+
+        heatmap = visualizer.heatmap(
+            correlation_matrix
+        )
+
+        if heatmap is not None:
+
             st.plotly_chart(
-                fig,
+                heatmap,
                 use_container_width=True
             )
 
-            graph_count += 1
+        else:
 
-        except Exception:
+            st.info(
+                "Not enough numeric columns "
+                "to generate heatmap."
+            )
 
-            continue
+    except Exception as e:
 
-    st.header(
-        "Correlation Heatmap"
-    )
-
-    heatmap = visualizer.heatmap(
-        corr_matrix
-    )
-
-    if heatmap:
-
-        st.plotly_chart(
-            heatmap,
-            use_container_width=True
+        st.error(
+            f"Error: {str(e)}"
         )
