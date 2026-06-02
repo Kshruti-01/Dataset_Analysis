@@ -8,6 +8,8 @@ class InsightGenerator:
 
         schema,
 
+        analysis_results,
+
         relationships
 
     ):
@@ -16,50 +18,85 @@ class InsightGenerator:
 
         self.schema = schema
 
+        self.analysis_results = analysis_results
+
         self.relationships = relationships
 
     def generate(self):
 
         insights = []
 
-        numeric_cols = [
+        # Dataset Summary
 
-            c
+        summary = self.analysis_results.get(
+            "Dataset Summary",
+            {}
+        )
 
-            for c, t
+        insights.append(
 
-            in self.schema.items()
+            f"The dataset contains "
+            f"{summary.get('Rows',0)} rows and "
+            f"{summary.get('Columns',0)} columns."
+        )
 
-            if t == "numeric"
-        ]
+        # Numeric Insights
 
-        for col in numeric_cols:
+        numeric = self.analysis_results.get(
+            "Numeric Analysis",
+            {}
+        )
 
-            avg = round(
+        for col, stats in numeric.items():
 
-                self.df[col].mean(),
+            insights.append(
 
-                2
+                f"The average value of "
+                f"{col} is "
+                f"{stats['Mean']}."
             )
 
             insights.append(
 
-                f"Average {col} is {avg}"
+                f"The maximum value recorded "
+                f"in {col} is "
+                f"{stats['Max']}."
             )
 
-            insights.append(
+        # Outliers
 
-                f"Maximum {col} is {self.df[col].max()}"
-            )
+        outliers = self.analysis_results.get(
+            "Outlier Analysis",
+            {}
+        )
+
+        for col, count in outliers.items():
+
+            if count > 0:
+
+                insights.append(
+
+                    f"{count} potential "
+                    f"outliers detected in "
+                    f"{col}."
+                )
+
+        # Relationships
 
         for rel in self.relationships:
 
             insights.append(
 
-                f"{rel['column_1']} and "
-                f"{rel['column_2']} have "
-                f"a correlation of "
-                f"{rel['correlation']}"
+                f"{rel['Column1']} and "
+                f"{rel['Column2']} show a "
+                f"strong correlation of "
+                f"{rel['Correlation']}."
+            )
+
+        if not insights:
+
+            insights.append(
+                "No major insights detected."
             )
 
         return insights
