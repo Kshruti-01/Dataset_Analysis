@@ -1,64 +1,79 @@
 class RecommendationEngine:
 
-    def __init__(self, df, schema):
+    def __init__(
+
+        self,
+
+        df,
+
+        schema
+
+    ):
 
         self.df = df
+
         self.schema = schema
 
-    def recommend_visualizations(self):
+    def recommend(self):
 
         recommendations = []
 
         numeric_cols = [
 
-            c
+            col
 
-            for c, t
+            for col, dtype
 
             in self.schema.items()
 
-            if t == "numeric"
+            if dtype == "numeric"
         ]
 
         categorical_cols = [
 
-            c
+            col
 
-            for c, t
+            for col, dtype
 
             in self.schema.items()
 
-            if t == "categorical"
+            if dtype == "categorical"
         ]
 
         date_cols = [
 
-            c
+            col
 
-            for c, t
+            for col, dtype
 
             in self.schema.items()
 
-            if t == "date"
+            if dtype == "date"
         ]
 
-        # Histogram
+        # Histograms
 
         for col in numeric_cols:
 
             recommendations.append({
 
                 "type": "histogram",
+
                 "column": col
             })
 
         # Scatter
 
-        if len(numeric_cols) >= 2:
+        for i in range(
 
-            for i in range(
+            len(numeric_cols)
+        ):
 
-                len(numeric_cols) - 1
+            for j in range(
+
+                i + 1,
+
+                len(numeric_cols)
             ):
 
                 recommendations.append({
@@ -67,10 +82,10 @@ class RecommendationEngine:
 
                     "x": numeric_cols[i],
 
-                    "y": numeric_cols[i + 1]
+                    "y": numeric_cols[j]
                 })
 
-        # Bar
+        # Bar Charts
 
         for cat in categorical_cols:
 
