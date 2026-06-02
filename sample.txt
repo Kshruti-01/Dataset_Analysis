@@ -1,15 +1,10 @@
-streamlit>=1.45.0
-
-pandas>=2.2.0
-numpy>=1.26.0
-
-plotly>=5.22.0
-
-openpyxl>=3.1.2
-xlrd>=2.0.1
-
-scipy>=1.13.0
-
-python-dateutil>=2.9.0
-
-ydata-profiling>=4.8.3
+ModuleNotFoundError: No module named 'analysis.insight_generator'
+Traceback:
+File "C:\Users\850085869\OneDrive - Genpact\Desktop\Project\data_analysis_v2\venv\Lib\site-packages\streamlit\runtime\scriptrunner\exec_code.py", line 129, in exec_func_with_error_handling
+    result = func()
+             ^^^^^^
+File "C:\Users\850085869\OneDrive - Genpact\Desktop\Project\data_analysis_v2\venv\Lib\site-packages\streamlit\runtime\scriptrunner\script_runner.py", line 789, in code_to_exec
+    exec(code, module.__dict__)  # noqa: S102
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "C:\Users\850085869\OneDrive - Genpact\Desktop\Project\data_analysis_v2\app.py", line 10, in <module>
+    from analysis.insight_generator import InsightGenerator
