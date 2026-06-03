@@ -1,0 +1,648 @@
+loader.py
+import pandas as pd
+
+class DatasetLoader:
+    @staticmethod
+    def detect_header(df_preview):
+        best_row = 0
+        best_score = -1
+        for idx in range(len(df_preview)):
+            row = df_preview.iloc[idx]
+            score = row.notna().sum()
+            if score > best_score:
+                best_score = score
+                best_row = idx
+        return best_row
+
+    @staticmethod
+    def load_file(uploaded_file):
+        file_name = uploaded_file.name.lower()
+        try:
+            if file_name.endswith(".csv"):
+                preview = pd.read_csv(
+                    uploaded_file,
+                    header=None,
+                    nrows=20,
+                    encoding="utf-8",
+                    sep=None,
+                    engine="python"
+                )
+                header_row = DatasetLoader.detect_header(preview)
+
+                # safeguard: if first row looks like strings, use it
+                if preview.iloc[0].apply(lambda x: isinstance(x, str)).mean() > 0.8:
+                    header_row = 0
+
+                uploaded_file.seek(0)
+                df = pd.read_csv(
+                    uploaded_file,
+                    header=header_row,
+                    encoding="utf-8",
+                    sep=None,
+                    engine="python"
+                )
+
+            elif file_name.endswith((".xlsx", ".xls")):
+                preview = pd.read_excel(uploaded_file, header=None, nrows=20)
+                header_row = DatasetLoader.detect_header(preview)
+
+                if preview.iloc[0].apply(lambda x: isinstance(x, str)).mean() > 0.8:
+                    header_row = 0
+
+                uploaded_file.seek(0)
+                df = pd.read_excel(uploaded_file, header=header_row)
+
+            else:
+                raise ValueError("Unsupported file format")
+        except Exception as e:
+            raise Exception(f"Unable to load dataset: {e}")
+
+        df.columns = df.columns.astype(str).str.strip().str.replace("\n", " ")
+        return df
+
+
+
+schema_detector.py
+import pandas as pd
+
+class SchemaDetector:
+    def __init__(self, df):
+        self.df = df
+
+    def classify_column(self, column):
+        series = self.df[column].dropna()
+        if len(series) == 0:
+            return "unknown"
+
+        string_series = series.astype(str)
+        total_rows = len(series)
+        unique_count = series.nunique()
+        unique_ratio = unique_count / total_rows
+
+        # Boolean detection (allow some noise)
+        unique_values = {str(v).strip().lower() for v in string_series.unique()}
+        boolean_values = {"true", "false", "yes", "no", "0", "1"}
+        if len(unique_values - boolean_values) <= 2:
+            return "boolean"
+
+        # Numeric detection (lower threshold)
+        numeric_series = pd.to_numeric(
+            string_series.str.replace(r'[$₹€,£,%]', '', regex=True).str.replace(',', '', regex=False),
+            errors="coerce"
+        )
+        numeric_ratio = numeric_series.notna().sum() / total_rows
+        if numeric_ratio > 0.7:  # lowered threshold
+            if unique_ratio > 0.98:
+                return "identifier"
+            return "numeric"
+
+        # Date detection (lower threshold)
+        date_series = pd.to_datetime(series, errors="coerce", dayfirst=True)
+        date_ratio = date_series.notna().sum() / total_rows
+        if date_ratio > 0.7:
+            return "date"
+
+        # Text vs categorical
+        if unique_ratio < 0.3:
+            return "categorical"
+        avg_len = string_series.str.len().mean()
+        if avg_len > 30:
+            return "text"
+        return "categorical"
+
+    def detect_schema(self):
+        schema = {}
+        for col in self.df.columns:
+            schema[col] = self.classify_column(col)
+        return schema
+
+
+cleaner.py
+import pandas as pd
+import numpy as np
+
+class DataCleaner:
+
+    def __init__(self,df,schema):
+        self.df = df.copy()
+        self.schema = schema
+
+    def remove_duplicates(self):
+        self.df = (self.df.drop_duplicates())
+
+    def remove_empty_columns(self):
+        self.df = self.df.dropna(axis=1,how="all")
+
+    def clean_numeric_columns(self):
+        for col, col_type in (self.schema.items()):
+            if col_type != "numeric":
+                continue
+
+            self.df[col] = (
+                self.df[col]
+                .astype(str)
+                .str.replace(r'[$₹€,£,%]','',regex=True).str.replace(',','',regex=False)
+            )
+            self.df[col] = pd.to_numeric(self.df[col],errors="coerce")
+
+    def clean_date_columns(self):
+        for col, col_type in (self.schema.items()):
+            if col_type != "date":
+                continue
+            self.df[col] = pd.to_datetime(self.df[col],errors="coerce")
+
+    def handle_missing_values(self):
+        for col in self.df.columns:
+            if pd.api.types.is_numeric_dtype(self.df[col]):
+                skew = (self.df[col].skew())
+                if abs(skew) > 1:
+                    fill_value = (self.df[col].median())
+                else:
+                    fill_value = (self.df[col].mean())
+                self.df[col] = (self.df[col].fillna(fill_value))
+            else:
+                mode = (self.df[col].mode())
+                if not mode.empty:
+                    self.df[col] = (self.df[col].fillna(mode[0]))
+
+    def clean_column_names(self):
+        self.df.columns = (self.df.columns.astype(str).str.strip().str.replace("\n"," "))
+
+    def clean(self):
+        self.clean_column_names()
+        self.remove_duplicates()
+        self.remove_empty_columns()
+        self.clean_numeric_columns()
+        self.clean_date_columns()
+        self.handle_missing_values()
+
+        return self.df
+
+analyzer.py
+import pandas as pd
+import numpy as np
+
+class DataAnalyzer:
+    def __init__(self, df, schema):
+        self.df = df
+        self.schema = schema
+
+    def dataset_summary(self):
+        return {
+            "Rows": len(self.df),
+            "Columns": len(self.df.columns),
+            "Missing Values":int(self.df.isnull().sum().sum()),
+            "Duplicate Rows":int(self.df.duplicated().sum())
+        }
+
+    def numeric_analysis(self):
+        results = {}
+        numeric_cols = [
+            col
+            for col, dtype
+            in self.schema.items()
+            if dtype == "numeric"
+        ]
+
+        for col in numeric_cols:
+            try:
+                results[col] = {
+
+                    "Mean":round(self.df[col].mean(),2),
+                    "Median":round(self.df[col].median(),2),
+                    "Min":round(self.df[col].min(),2),
+                    "Max":round(self.df[col].max(),2),
+                    "Std":round(self.df[col].std(),2),
+                    "Missing":int(self.df[col].isnull().sum())
+                }
+
+            except:
+                continue
+        return results
+
+    def categorical_analysis(self):
+        results = {}
+        categorical_cols = [
+            col
+            for col, dtype
+            in self.schema.items()
+            if dtype == "categorical"
+        ]
+
+        for col in categorical_cols:
+            try:
+                mode = self.df[col].mode()
+                results[col] = {
+                    "Unique Values":int(self.df[col].nunique()),
+                    "Top Category":
+                    mode.iloc[0]
+                    if not mode.empty
+                    else None
+                }
+            except:
+                continue
+        return results
+    def date_analysis(self):
+        results = {}
+        date_cols = [
+            col
+            for col, dtype
+            in self.schema.items()
+            if dtype == "date"
+        ]
+
+        for col in date_cols:
+            try:
+                results[col] = {
+                    "Start":str(self.df[col].min()),
+                    "End":str(self.df[col].max())
+                }
+            except:
+                continue
+        return results
+
+    def outlier_analysis(self):
+        outliers = {}
+        numeric_cols = [
+            col
+            for col, dtype
+            in self.schema.items()
+            if dtype == "numeric"
+        ]
+
+        for col in numeric_cols:
+            try:
+                q1 = self.df[col].quantile(0.25)
+                q3 = self.df[col].quantile(0.75)
+                iqr = q3 - q1
+                lower = q1 - 1.5 * iqr
+                upper = q3 + 1.5 * iqr
+                count = len(self.df[(self.df[col] < lower)|(self.df[col] > upper)])
+                outliers[col] = count
+            except:
+                continue
+        return outliers
+
+    def run_analysis(self):
+        return {
+
+            "Dataset Summary":self.dataset_summary(),
+            "Numeric Analysis":self.numeric_analysis(),
+            "Categorical Analysis":self.categorical_analysis(),
+            "Date Analysis":self.date_analysis(),
+            "Outlier Analysis":self.outlier_analysis()
+        }
+
+profiler.py
+import pandas as pd
+
+class DatasetProfiler:
+
+    def __init__(self, df):
+
+        self.df = df
+
+    def generate_profile(self):
+
+        profile = {}
+        profile["rows"] = len(self.df)
+        profile["columns"] = len(self.df.columns)
+        profile["duplicates"] = (self.df.duplicated().sum())
+        profile["missing_values"] = (self.df.isna().sum().sum())
+        profile["memory_usage_mb"] = round(self.df.memory_usage(deep=True).sum() / (1024 * 1024),2)
+        profile["column_types"] = (self.df.dtypes.astype(str).to_dict())
+        return profile
+
+    def quality_score(self):
+        score = 100
+        missing_pct = (self.df.isna().sum().sum()/(self.df.shape[0]* self.df.shape[1])) * 100
+        duplicate_pct = (self.df.duplicated().sum()/max(len(self.df), 1)) * 100
+        score -= min(missing_pct * 0.5,30)
+        score -= min(duplicate_pct * 0.5,20)
+
+        return round(max(score, 0),2)
+
+relationship_engine.py
+import pandas as pd
+
+
+class RelationshipEngine:
+
+    def __init__(self,df,schema):
+        self.df = df
+        self.schema = schema
+
+    def get_numeric_columns(self):
+        return [
+            col
+            for col, dtype
+            in self.schema.items()
+            if dtype == "numeric"
+        ]
+
+    def correlation_matrix(self):
+        numeric_cols = (self.get_numeric_columns())
+        if len(numeric_cols) < 2:
+            return None
+        return (self.df[numeric_cols].corr())
+
+    def strong_relationships(self,threshold=0.7):
+        corr = (self.correlation_matrix())
+        if corr is None:
+            return []
+        relationships = []
+
+        for col1 in corr.columns:
+            for col2 in corr.columns:
+                if col1 >= col2:
+                    continue
+                value = corr.loc[col1,col2]
+                if abs(value) >= threshold:
+                    relationships.append({
+                        "Column1": col1,
+                        "Column2": col2,
+                        "Correlation":
+                        round(value, 2)
+                    })
+
+        return relationships
+
+recommendation_engine.py
+class RecommendationEngine:
+
+    def __init__(self,df,schema):
+        self.df = df
+        self.schema = schema
+
+    def recommend(self):
+        recommendations = []
+        numeric_cols = [
+            col
+            for col, dtype
+            in self.schema.items()
+            if dtype == "numeric"
+        ]
+
+        categorical_cols = [
+            col
+            for col, dtype
+            in self.schema.items()
+            if dtype == "categorical"
+        ]
+
+        date_cols = [
+            col
+            for col, dtype
+            in self.schema.items()
+            if dtype == "date"
+        ]
+
+        # Histograms
+        for col in numeric_cols:
+            recommendations.append({"type": "histogram","column": col})
+
+        # Scatter
+        for i in range(len(numeric_cols)):
+            for j in range(i + 1,len(numeric_cols)):
+                recommendations.append({
+                    "type": "scatter",
+                    "x": numeric_cols[i],
+                    "y": numeric_cols[j]
+                })
+
+        # Bar Charts
+        for cat in categorical_cols:
+            for num in numeric_cols:
+                recommendations.append({
+                    "type": "bar",
+                    "category": cat,
+                    "value": num
+                })
+
+        # Time Series
+        for date_col in date_cols:
+            for num_col in numeric_cols:
+                recommendations.append({
+                    "type": "line",
+                    "date": date_col,
+                    "value": num_col
+                })
+        return recommendations
+
+visualizer.py
+import plotly.express as px
+
+class Visualizer:
+    def __init__(self, df):
+        self.df = df
+
+    # Histogram
+    def histogram(self, column):
+        return px.histogram(
+            self.df,
+            x=column,
+            title=f"Distribution of {column}"
+        )
+
+    # Scatter Plot
+    def scatter(self, x, y):
+        return px.scatter(
+            self.df,
+            x=x,
+            y=y,
+            title=f"{x} vs {y}"
+        )
+
+    # Bar Chart with flexible aggregation
+    def bar(self, category, value, agg="mean"):
+        grouped = (
+            self.df
+            .groupby(category)[value]
+            .agg(agg)
+            .reset_index()
+        )
+        return px.bar(
+            grouped,
+            x=category,
+            y=value,
+            title=f"{value} by {category} ({agg})"
+        )
+
+    # Line Chart with flexible aggregation
+    def line(self, date_col, value_col, agg="sum"):
+        grouped = (
+            self.df
+            .groupby(date_col)[value_col]
+            .agg(agg)
+            .reset_index()
+        )
+        return px.line(
+            grouped,
+            x=date_col,
+            y=value_col,
+            title=f"{value_col} Trend ({agg})"
+        )
+
+    # Box Plot
+    def boxplot(self, column):
+        return px.box(
+            self.df,
+            y=column,
+            title=f"Outlier Analysis - {column}"
+        )
+
+    # Correlation Heatmap
+    def heatmap(self, correlation_matrix):
+        if correlation_matrix is None:
+            return None
+        return px.imshow(
+            correlation_matrix,
+            text_auto=True,
+            aspect="auto",
+            title="Correlation Heatmap"
+        )
+
+insight_generator.py
+class InsightGenerator:
+    def __init__(self, df, schema, analysis_results, relationships):
+        self.df = df
+        self.schema = schema
+        self.analysis_results = analysis_results
+        self.relationships = relationships
+
+    def generate(self):
+        insights = []
+
+        # Dataset Summary
+        summary = self.analysis_results.get("Dataset Summary", {})
+        insights.append(
+            f"The dataset contains {summary.get('Rows',0)} rows and {summary.get('Columns',0)} columns."
+        )
+
+        # Numeric Insights
+        numeric = self.analysis_results.get("Numeric Analysis", {})
+        for col, stats in numeric.items():
+            insights.append(f"The average value of {col} is {stats['Mean']}.")
+            insights.append(f"The maximum value recorded in {col} is {stats['Max']}.")
+
+        # Categorical Insights
+        categorical = self.analysis_results.get("Categorical Analysis", {})
+        for col, stats in categorical.items():
+            insights.append(
+                f"{col} has {stats['Unique Values']} unique values. "
+                f"The most frequent category is {stats['Top Category']}."
+            )
+
+        # Date Insights
+        date_analysis = self.analysis_results.get("Date Analysis", {})
+        for col, stats in date_analysis.items():
+            insights.append(f"{col} spans from {stats['Start']} to {stats['End']}.")
+
+        # Outliers
+        outliers = self.analysis_results.get("Outlier Analysis", {})
+        for col, count in outliers.items():
+            if count > 0:
+                insights.append(f"{count} potential outliers detected in {col}.")
+
+        # Relationships
+        for rel in self.relationships:
+            insights.append(
+                f"{rel['Column1']} and {rel['Column2']} show a strong correlation of {rel['Correlation']}."
+            )
+
+        if not insights:
+            insights.append("No major insights detected.")
+        return insights
+
+
+app.py
+import streamlit as st
+
+from analysis.loader import DatasetLoader
+from analysis.schema_detector import SchemaDetector
+from analysis.cleaner import DataCleaner
+from analysis.analyzer import DataAnalyzer
+from analysis.relationship_engine import RelationshipEngine
+from analysis.recommendation_engine import RecommendationEngine
+from analysis.visualizer import Visualizer
+from analysis.insight_generator import InsightGenerator
+
+st.set_page_config(page_title="Dataset Analyzer", layout="wide")
+st.title("Dataset Analysis Platform")
+
+uploaded_file = st.file_uploader("Upload CSV or Excel File", type=["csv", "xlsx", "xls"])
+
+if uploaded_file:
+    try:
+        df = DatasetLoader.load_file(uploaded_file)
+        st.success("Dataset Loaded Successfully")
+        st.subheader("Dataset Preview")
+        st.dataframe(df.head())
+
+        # Initial schema detection
+        schema = SchemaDetector(df).detect_schema()
+
+        # Cleaning
+        df = DataCleaner(df, schema).clean()
+
+        # Re-detect schema after cleaning
+        schema = SchemaDetector(df).detect_schema()
+
+        # Analysis
+        analyzer = DataAnalyzer(df, schema)
+        analysis_results = analyzer.run_analysis()
+
+        # Relationships
+        relationship_engine = RelationshipEngine(df, schema)
+        correlation_matrix = relationship_engine.correlation_matrix()
+        relationships = relationship_engine.strong_relationships()
+
+        # Insights
+        insights = InsightGenerator(df, schema, analysis_results, relationships).generate()
+
+        st.header("Detected Schema")
+        st.json(schema)
+
+        st.header("Dataset Analysis")
+        st.json(analysis_results)
+
+        st.header("Insights")
+        for insight in insights:
+            st.success(insight)
+
+        visualizer = Visualizer(df)
+        recommendation_engine = RecommendationEngine(df, schema)
+        recommendations = recommendation_engine.recommend()
+        st.header("Recommended Visualizations")
+        graph_count = 0
+        MAX_GRAPHS = 10
+
+        for rec in recommendations:
+            if graph_count >= MAX_GRAPHS:
+                break
+            try:
+                if rec["type"] == "histogram":
+                    fig = visualizer.histogram(rec["column"])
+                elif rec["type"] == "scatter":
+                    fig = visualizer.scatter(rec["x"], rec["y"])
+                elif rec["type"] == "bar":
+                    fig = visualizer.bar(rec["category"], rec["value"], agg="mean")
+                elif rec["type"] == "line":
+                    fig = visualizer.line(rec["date"], rec["value"], agg="sum")
+                else:
+                    continue
+                st.plotly_chart(fig, use_container_width=True)
+                graph_count += 1
+            except Exception as e:
+                st.warning(f"Skipped visualization {rec}: {str(e)}")
+
+        st.header("Correlation Heatmap")
+        heatmap = visualizer.heatmap(correlation_matrix)
+
+        if heatmap is not None:
+            st.plotly_chart(heatmap, use_container_width=True)
+        else:
+            st.info("Not enough numeric columns to generate heatmap.")
+    except Exception as e:
+        st.error(f"Error: {str(e)}")
+
