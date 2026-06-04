@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+"""
+Dataset Analyzer Platform
+A comprehensive tool for dataset analysis, cleaning, and visualization.
+Run with: streamlit run app.py
+"""
 
 import streamlit as st
 import pandas as pd
@@ -15,6 +21,7 @@ import re
 # Page configuration
 st.set_page_config(
     page_title="Dataset Analyzer Platform",
+    page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -73,13 +80,17 @@ class DatasetAnalyzer:
         """Get detailed column information"""
         col_info = []
         for col in self.df.columns:
+            sample_val = "NaN"
+            if len(self.df[col].dropna()) > 0:
+                sample_val = str(self.df[col].dropna().iloc[0])
+            
             col_info.append({
                 "Column": col,
                 "Type": str(self.df[col].dtype),
                 "Unique Values": self.df[col].nunique(),
                 "Missing Values": self.df[col].isnull().sum(),
                 "Missing %": round((self.df[col].isnull().sum() / len(self.df)) * 100, 2) if len(self.df) > 0 else 0,
-                "Sample Value": str(self.df[col].dropna().iloc[0]) if len(self.df[col].dropna()) > 0 else "NaN"
+                "Sample Value": sample_val
             })
         
         return pd.DataFrame(col_info)
@@ -104,7 +115,6 @@ class DatasetAnalyzer:
             unique_count = self.df[col].nunique()
             missing_count = self.df[col].isnull().sum()
             
-            # Determine column role
             if dtype in ['int64', 'float64']:
                 col_type = "numeric"
             elif dtype == 'object':
@@ -117,7 +127,6 @@ class DatasetAnalyzer:
             else:
                 col_type = "other"
             
-            # Sanitize sample values explicitly to standard native Python classes
             raw_samples = self.df[col].dropna().head(3).tolist()
             safe_samples = []
             for val in raw_samples:
@@ -145,17 +154,17 @@ class DatasetAnalyzer:
         insights = []
         basic_info = self.get_basic_info()
         
-        insights.append(f"Dataset contains **{basic_info['rows']:,}** rows and **{basic_info['columns']}** columns.")
+        insights.append(f"📊 Dataset contains **{basic_info['rows']:,}** rows and **{basic_info['columns']}** columns.")
         
         if basic_info['missing_values'] > 0:
-            insights.append(f"Found **{basic_info['missing_values']:,}** missing values ({basic_info['missing_percentage']:.1f}% of total data).")
+            insights.append(f"⚠️ Found **{basic_info['missing_values']:,}** missing values ({basic_info['missing_percentage']:.1f}% of total data).")
         else:
-            insights.append("No missing values found in the dataset.")
+            insights.append("✅ No missing values found in the dataset.")
         
         if basic_info['duplicates'] > 0:
-            insights.append(f"Detected **{basic_info['duplicates']:,}** duplicate rows.")
+            insights.append(f"🔄 Detected **{basic_info['duplicates']:,}** duplicate rows.")
         else:
-            insights.append("No duplicate rows found.")
+            insights.append("✅ No duplicate rows found.")
         
         numeric_cols = self.df.select_dtypes(include=[np.number]).columns.tolist()
         categorical_cols = self.df.select_dtypes(include=['object']).columns.tolist()
@@ -165,13 +174,13 @@ class DatasetAnalyzer:
         for col in numeric_cols[:3]:
             stats = self.df[col].describe()
             if not stats.empty and pd.notnull(stats['min']):
-                insights.append(f"Column '{col}': range [{stats['min']:.2f}, {stats['max']:.2f}], mean={stats['mean']:.2f}")
+                insights.append(f"📈 Column '{col}': range [{stats['min']:.2f}, {stats['max']:.2f}], mean={stats['mean']:.2f}")
         
         for col in categorical_cols[:3]:
             if len(self.df) > 0:
                 unique_pct = (self.df[col].nunique() / len(self.df)) * 100
                 if unique_pct > 50 and self.df[col].nunique() > 50:
-                    insights.append(f"Column '{col}' has high cardinality ({self.df[col].nunique():,} unique values).")
+                    insights.append(f"🔍 Column '{col}' has high cardinality ({self.df[col].nunique():,} unique values).")
         
         if len(numeric_cols) >= 2:
             corr_matrix = self.df[numeric_cols].corr()
@@ -179,7 +188,7 @@ class DatasetAnalyzer:
                 for j in range(i+1, len(corr_matrix.columns)):
                     corr_val = corr_matrix.iloc[i, j]
                     if abs(corr_val) > 0.7:
-                        insights.append(f"Strong correlation ({corr_val:.2f}) between '{corr_matrix.columns[i]}' and '{corr_matrix.columns[j]}'.")
+                        insights.append(f"🔗 Strong correlation ({corr_val:.2f}) between '{corr_matrix.columns[i]}' and '{corr_matrix.columns[j]}'.")
         
         return insights
     
@@ -189,7 +198,6 @@ class DatasetAnalyzer:
         numeric_cols = self.df.select_dtypes(include=[np.number]).columns.tolist()
         categorical_cols = self.df.select_dtypes(include=['object']).columns.tolist()
         
-        # 1. Distribution plots
         if numeric_cols:
             for col in numeric_cols[:3]:
                 fig = px.histogram(
@@ -201,7 +209,6 @@ class DatasetAnalyzer:
                 fig.update_layout(height=400)
                 plots[f"dist_{col}"] = fig
         
-        # 2. Box plots
         if len(numeric_cols) >= 2:
             numeric_subset = self.df[numeric_cols[:5]]
             melted = numeric_subset.melt(var_name="Variable", value_name="Value")
@@ -213,7 +220,6 @@ class DatasetAnalyzer:
             fig.update_layout(height=450)
             plots["boxplots"] = fig
         
-        # 3. Correlation Heatmap
         if len(numeric_cols) >= 2:
             corr_matrix = self.df[numeric_cols].corr()
             fig = px.imshow(
@@ -227,7 +233,6 @@ class DatasetAnalyzer:
             fig.update_layout(height=500)
             plots["correlation"] = fig
         
-        # 4. Filtered Categorical Bar Charts
         if categorical_cols:
             visualized_count = 0
             for col in categorical_cols:
@@ -237,7 +242,7 @@ class DatasetAnalyzer:
                 if len(self.df) > 0:
                     unique_pct = self.df[col].nunique() / len(self.df)
                     if unique_pct > 0.5 and self.df[col].nunique() > 50:
-                        continue  # Bypass true unique string identifiers or hashes
+                        continue
                 
                 value_counts = self.df[col].value_counts().head(15)
                 if value_counts.empty:
@@ -256,7 +261,6 @@ class DatasetAnalyzer:
                 plots[f"cat_{col}"] = fig
                 visualized_count += 1
         
-        # 5. Missing values heatmap
         if self.df.isnull().sum().sum() > 0:
             viz_df = self.df
             is_sampled = False
@@ -329,14 +333,12 @@ class DataCleaner:
         df_clean = df.copy()
         for col in df_clean.columns:
             if df_clean[col].dtype == 'object':
-                # Try to convert to numeric
                 try:
                     df_clean[col] = pd.to_numeric(df_clean[col])
                     continue
                 except:
                     pass
                 
-                # Try to convert to datetime
                 try:
                     sample_str = str(df_clean[col].dropna().iloc[0]) if df_clean[col].dropna().shape[0] > 0 else ""
                     if re.search(r'\d{2,4}[-/]\d{2}[-/]\d{2,4}', sample_str) or 'Feb' in sample_str or 'Jan' in sample_str:
@@ -347,7 +349,6 @@ class DataCleaner:
     
     @staticmethod
     def remove_outliers(df: pd.DataFrame, columns: List[str] = None, method: str = "iqr") -> pd.DataFrame:
-        """Applies holistic boolean masks to eliminate cascading table data wiping loops"""
         df_clean = df.copy()
         if columns is None:
             columns = df.select_dtypes(include=[np.number]).columns.tolist()
@@ -356,7 +357,6 @@ class DataCleaner:
             return df_clean
             
         mask = pd.Series(True, index=df_clean.index)
-        
         for col in columns:
             if col in df_clean.columns and df_clean[col].dtype in ['int64', 'float64']:
                 if df_clean[col].nunique() <= 1:
@@ -376,15 +376,14 @@ class DataCleaner:
                         mask = mask & (abs(df_clean[col] - mean) <= 3 * std)
         
         if mask.sum() == 0:
-            return df_clean  # Safety switch fallback to prevent deleting data completely
+            return df_clean
         return df_clean[mask]
 
 
 def load_dataset(uploaded_file) -> Tuple[pd.DataFrame, str]:
     """
-    Advanced automated handler for loading files. Automatically flags and corrects 
-    leading metadata spacing blocks, standard rows, and transposed data key configurations.
-    Only supports CSV and Excel extensions.
+    Safe dataset layout parser that preserves all physical spreadsheet tracks (A-G).
+    Replaces destructive drop rules with dynamic header repairs.
     """
     file_extension = uploaded_file.name.split('.')[-1].lower()
     df_raw = None
@@ -397,7 +396,6 @@ def load_dataset(uploaded_file) -> Tuple[pd.DataFrame, str]:
             df_raw = pd.read_csv(io.BytesIO(raw_data), encoding=encoding, header=None)
         except:
             df_raw = pd.read_csv(io.BytesIO(raw_data), encoding='utf-8', engine='python', header=None)
-        
     elif file_extension in ['xlsx', 'xls']:
         df_raw = pd.read_excel(uploaded_file, header=None)
     else:
@@ -406,27 +404,44 @@ def load_dataset(uploaded_file) -> Tuple[pd.DataFrame, str]:
     if df_raw is None or df_raw.empty:
         return df_raw, uploaded_file.name
 
-    # Header Location Scanner Loop
+    # Step 1: Only drop completely dead space rows/columns (where 100% of values are NaN)
+    df_raw = df_raw.dropna(how='all', axis=0).dropna(how='all', axis=1).reset_index(drop=True)
+
+    if df_raw.empty:
+        return df_raw, uploaded_file.name
+
+    # Step 2: Find the main header row index safely
     header_row_idx = 0
     for idx, row in df_raw.iterrows():
         valid_cells = row.dropna().tolist()
         if len(valid_cells) > 0:
             string_cells = [str(c) for c in valid_cells if not str(c).strip().replace('.', '', 1).isdigit()]
-            if len(string_cells) >= len(valid_cells) * 0.5 or idx == df_raw.dropna(how='all').index[0]:
+            if len(string_cells) >= len(valid_cells) * 0.3 or idx == df_raw.dropna(how='all').index[0]:
                 header_row_idx = idx
                 break
 
+    # Step 3: Slice data from header down
     df_cleaned = df_raw.iloc[header_row_idx:].reset_index(drop=True)
-    df_cleaned.columns = [str(c).strip() for c in df_cleaned.iloc[0]]
-    df_cleaned = df_cleaned[1:].reset_index(drop=True)
     
-    df_cleaned = df_cleaned.loc[:, df_cleaned.columns.notna() & (df_cleaned.columns != 'None') & (df_cleaned.columns != 'nan')]
-    df_cleaned = df_cleaned.loc[:, ~df_cleaned.columns.str.startswith('Unnamed:')]
+    # Step 4: Generate explicit header strings safely without losing columns
+    raw_headers = []
+    for col_pos in range(df_cleaned.shape[1]):
+        header_val = str(df_cleaned.iloc[0, col_pos]).strip()
+        
+        # If the header value is empty, invalid, or parsed as NaN, substitute a clean label index
+        if header_val.lower() in ['nan', 'none', ''] or header_val.startswith('Unnamed:'):
+            raw_headers.append(f"Column_{col_pos + 1}")
+        else:
+            raw_headers.append(header_val)
+            
+    df_cleaned.columns = raw_headers
+    df_cleaned = df_cleaned[1:].reset_index(drop=True)
 
-    if df_cleaned.empty:
-        return df_cleaned, uploaded_file.name
+    # 🛠️ FIXED CRITICAL POINT:
+    # We no longer execute column filtering code blocks that look for "Unnamed:" or "nan". 
+    # Columns A through G are now fully preserved even if their header properties are messy.
 
-    # Transposition Evaluator
+    # Step 5: Check for structural side-aligned metadata blocks (Transposition check)
     if df_cleaned.shape[1] == 2:
         first_col_values = df_cleaned.iloc[:, 0].dropna().tolist()
         unique_keys_count = len(set(first_col_values))
@@ -443,11 +458,11 @@ def load_dataset(uploaded_file) -> Tuple[pd.DataFrame, str]:
 
 def main():
     """Main Streamlit application"""
-    st.markdown('<div class="main-header"> Dataset Analyzer Platform</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">📊 Dataset Analyzer Platform</div>', unsafe_allow_html=True)
     st.markdown("---")
     
     with st.sidebar:
-        st.markdown("Upload Dataset")
+        st.markdown("## 📂 Upload Dataset")
         uploaded_file = st.file_uploader(
             "Choose a file (CSV or Excel)",
             type=['csv', 'xlsx', 'xls'],
@@ -455,7 +470,7 @@ def main():
         )
         
         st.markdown("---")
-        st.markdown("Data Cleaning Options")
+        st.markdown("## 🛠️ Data Cleaning Options")
         
         if 'current_df' in st.session_state and st.session_state.current_df is not None:
             cleaning_tab = st.radio(
@@ -509,7 +524,7 @@ def main():
                             st.warning("No numeric columns found for outlier removal.")
         
         st.markdown("---")
-        st.markdown("About")
+        st.markdown("### ℹ️ About")
         st.info(
             "This platform automatically detects dataset structure, "
             "provides cleaning tools, generates visualizations, and "
@@ -528,17 +543,17 @@ def main():
                     st.session_state.current_df = df
                     st.session_state.current_file = filename
                     st.session_state.original_df = df.copy()
-                    st.success(f"Dataset '{filename}' loaded successfully!")
+                    st.success(f"✅ Dataset '{filename}' loaded successfully!")
             
             df = st.session_state.current_df
             analyzer = DatasetAnalyzer(df, st.session_state.current_file)
             
             tab1, tab2, tab3, tab4, tab5 = st.tabs([
-                "Dataset Overview", 
-                "Schema Detection", 
-                "Visualizations", 
-                "Insights",
-                "Export"
+                "📋 Dataset Overview", 
+                "🔍 Schema Detection", 
+                "📊 Visualizations", 
+                "💡 Insights",
+                "📥 Export"
             ])
             
             with tab1:
@@ -556,16 +571,16 @@ def main():
                     st.markdown(f'<div class="metric-card"><h3>{basic_info["duplicates"]:,}</h3><p>Duplicate Rows</p></div>', unsafe_allow_html=True)
                 
                 st.markdown("---")
-                st.markdown("Data Preview")
+                st.markdown("### 📄 Data Preview")
                 st.dataframe(df.head(20), use_container_width=True)
                 
-                st.markdown("Column Information")
+                st.markdown("### 📋 Column Information")
                 col_info_df = analyzer.get_column_info()
                 st.dataframe(col_info_df, use_container_width=True)
                 
                 numeric_stats = analyzer.get_numeric_stats()
                 if not numeric_stats.empty:
-                    st.markdown("Numeric Column Statistics")
+                    st.markdown("### 📈 Numeric Column Statistics")
                     st.dataframe(numeric_stats, use_container_width=True)
                 
                 st.markdown(f"**Memory Usage:** {basic_info['memory_usage']:.2f} MB")
@@ -585,7 +600,7 @@ def main():
                 
                 st.json(schema)
                 
-                st.markdown("Data Type Distribution")
+                st.markdown("### 📊 Data Type Distribution")
                 dtype_counts = df.dtypes.astype(str).value_counts()
                 fig = px.pie(
                     values=dtype_counts.values, 
@@ -611,7 +626,7 @@ def main():
                     st.markdown(f'<div class="insight-card">{insight}</div>', unsafe_allow_html=True)
                 
                 st.markdown("---")
-                st.markdown("Suggested Next Steps")
+                st.markdown("### 🎯 Suggested Next Steps")
                 numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
                 categorical_cols = df.select_dtypes(include=['object']).columns.tolist()
                 
@@ -635,7 +650,7 @@ def main():
                         if export_format == "CSV":
                             csv = df.to_csv(index=False)
                             st.download_button(
-                                label="Download CSV",
+                                label="📥 Download CSV",
                                 data=csv,
                                 file_name=f"cleaned_dataset_{st.session_state.current_file.split('.')[0]}.csv",
                                 mime="text/csv"
@@ -645,14 +660,14 @@ def main():
                             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                                 df.to_excel(writer, index=False, sheet_name='Cleaned_Data')
                             st.download_button(
-                                label="Download Excel",
+                                label="📥 Download Excel",
                                 data=output.getvalue(),
                                 file_name=f"cleaned_dataset_{st.session_state.current_file.split('.')[0]}.xlsx",
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                             )
                 
                 st.markdown("---")
-                st.markdown("Reset to Original")
+                st.markdown("### 🔄 Reset to Original")
                 if st.button("Reset to Original Dataset"):
                     st.session_state.current_df = st.session_state.original_df.copy()
                     st.success("Dataset reset to original structure settings!")
@@ -662,7 +677,7 @@ def main():
             st.error(f"Error loading dataset: {str(e)}")
             st.info("Ensure your file follows clean table standard configurations.")
     else:
-        st.info("upload a dataset file (CSV or Excel) to begin analysis.")
+        st.info("👈 Please upload a dataset file (CSV or Excel) to begin analysis.")
 
 
 if __name__ == "__main__":
