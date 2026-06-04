@@ -1,941 +1,660 @@
-loader.py
-import pandas as pd
-import io
 
-
-class DatasetLoader:
-
-    @staticmethod
-    def detect_header(df_preview):
-        """
-        Find the row that most looks like a header:
-        - Prefers rows where the majority of values are strings
-        - Falls back to the row with the most non-null values
-        """
-        best_row = 0
-        best_score = -1
-
-        for idx in range(min(10, len(df_preview))):
-            row = df_preview.iloc[idx]
-            non_null = row.notna().sum()
-            string_count = row.apply(lambda x: isinstance(x, str) and not str(x).replace('.', '', 1).lstrip('-').isdigit()).sum()
-            # Weight string-ness heavily — headers are almost always strings
-            score = string_count * 2 + non_null
-            if score > best_score:
-                best_score = score
-                best_row = idx
-
-        return best_row
-
-    @staticmethod
-    def load_file(uploaded_file):
-        file_name = uploaded_file.name.lower()
-
-        try:
-            if file_name.endswith(".csv"):
-                raw = uploaded_file.read()
-                uploaded_file.seek(0)
-
-                # Detect encoding
-                try:
-                    raw.decode("utf-8")
-                    encoding = "utf-8"
-                except UnicodeDecodeError:
-                    encoding = "latin-1"
-
-                preview = pd.read_csv(
-                    io.BytesIO(raw),
-                    header=None,
-                    nrows=20,
-                    encoding=encoding,
-                    sep=None,
-                    engine="python"
-                )
-                header_row = DatasetLoader.detect_header(preview)
-
-                df = pd.read_csv(
-                    io.BytesIO(raw),
-                    header=header_row,
-                    encoding=encoding,
-                    sep=None,
-                    engine="python"
-                )
-
-            elif file_name.endswith((".xlsx", ".xls")):
-                # Read bytes once so we can re-use without seek issues
-                raw = uploaded_file.read()
-
-                preview = pd.read_excel(io.BytesIO(raw), header=None, nrows=20)
-                header_row = DatasetLoader.detect_header(preview)
-
-                df = pd.read_excel(io.BytesIO(raw), header=header_row)
-
-            else:
-                raise ValueError("Unsupported file format. Please upload CSV or Excel.")
-
-        except Exception as e:
-            raise Exception(f"Unable to load dataset: {e}")
-
-        # Normalize column names
-        df.columns = (
-            df.columns
-            .astype(str)
-            .str.strip()
-            .str.replace("\n", " ", regex=False)
-            .str.replace(r'\s+', ' ', regex=True)
-        )
-
-        # Drop completely unnamed columns (e.g. "Unnamed: 5")
-        df = df.loc[:, ~df.columns.str.match(r'^Unnamed:\s*\d+$')]
-
-        return df
-
-schema_detector.py
-import warnings
-import pandas as pd
-
-
-class SchemaDetector:
-    def __init__(self, df):
-        self.df = df
-
-    def classify_column(self, column):
-        series = self.df[column].dropna()
-        if len(series) == 0:
-            return "unknown"
-
-        string_series = series.astype(str).str.strip()
-        total_rows = len(series)
-        unique_count = series.nunique()
-        unique_ratio = unique_count / total_rows
-
-        # --- Boolean detection (strict: only exact boolean-like sets) ---
-        unique_values = {v.lower() for v in string_series.unique()}
-        boolean_sets = [
-            {"true", "false"},
-            {"yes", "no"},
-            {"0", "1"},
-            {"y", "n"},
-        ]
-        if any(unique_values == bs for bs in boolean_sets):
-            return "boolean"
-
-        # --- Numeric detection ---
-        cleaned = (
-            string_series
-            .str.replace(r'[$₹€£,% ]', '', regex=True)
-            .str.strip()
-        )
-        numeric_series = pd.to_numeric(cleaned, errors="coerce")
-        numeric_ratio = numeric_series.notna().sum() / total_rows
-
-        if numeric_ratio > 0.7:
-            # Identifier: sequential integers with near-perfect uniqueness AND large dataset
-            # Check if values look like IDs: integers, high cardinality, large n
-            is_integer_like = (numeric_series.dropna() % 1 == 0).all()
-            if unique_ratio > 0.999 and total_rows > 500 and is_integer_like:
-                return "identifier"
-            # Low cardinality numeric → treat as categorical (e.g. rating 1-5)
-            if unique_count <= 10 and unique_ratio < 0.05:
-                return "categorical"
-            return "numeric"
-
-        # --- Date detection ---
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                date_series = pd.to_datetime(series, errors="coerce", dayfirst=True)
-            date_ratio = date_series.notna().sum() / total_rows
-            if date_ratio > 0.7:
-                return "date"
-        except Exception:
-            pass
-
-        # --- Text vs Categorical ---
-        avg_len = string_series.str.len().mean()
-        if unique_ratio < 0.5 and unique_count <= max(50, total_rows * 0.1):
-            return "categorical"
-        if avg_len > 40:
-            return "text"
-
-        return "categorical"
-
-    def detect_schema(self):
-        schema = {}
-        for col in self.df.columns:
-            schema[col] = self.classify_column(col)
-        return schema
-
-
-cleaner.py
-import pandas as pd
-import numpy as np
-
-
-class DataCleaner:
-
-    def __init__(self, df, schema):
-        self.df = df.copy()
-        self.schema = dict(schema)  # own copy so we can mutate safely
-
-    def clean_column_names(self):
-        self.df.columns = (
-            self.df.columns
-            .astype(str)
-            .str.strip()
-            .str.replace("\n", " ", regex=False)
-            .str.replace(r'\s+', ' ', regex=True)
-        )
-
-    def remove_duplicates(self):
-        before = len(self.df)
-        self.df = self.df.drop_duplicates()
-        after = len(self.df)
-        if before != after:
-            print(f"[Cleaner] Removed {before - after} duplicate rows.")
-
-    def remove_empty_columns(self):
-        before = list(self.df.columns)
-        self.df = self.df.dropna(axis=1, how="all")
-        removed = set(before) - set(self.df.columns)
-        # Keep schema in sync with surviving columns
-        for col in removed:
-            self.schema.pop(col, None)
-
-    def clean_numeric_columns(self):
-        for col, col_type in list(self.schema.items()):
-            if col_type != "numeric":
-                continue
-            if col not in self.df.columns:
-                continue
-            cleaned = (
-                self.df[col]
-                .astype(str)
-                .str.replace(r'[$₹€£,% ]', '', regex=True)
-                .str.strip()
-            )
-            self.df[col] = pd.to_numeric(cleaned, errors="coerce")
-
-    def clean_date_columns(self):
-        for col, col_type in list(self.schema.items()):
-            if col_type != "date":
-                continue
-            if col not in self.df.columns:
-                continue
-            self.df[col] = pd.to_datetime(self.df[col], errors="coerce", dayfirst=True)
-
-    def handle_missing_values(self):
-        for col in self.df.columns:
-            if col not in self.schema:
-                continue
-            series = self.df[col]
-            missing_count = series.isna().sum()
-            if missing_count == 0:
-                continue
-
-            if pd.api.types.is_numeric_dtype(series):
-                non_null = series.dropna()
-                if len(non_null) == 0:
-                    # Entire column is null — drop it
-                    self.df.drop(columns=[col], inplace=True)
-                    self.schema.pop(col, None)
-                    continue
-                try:
-                    skew = non_null.skew()
-                    fill_value = non_null.median() if abs(skew) > 1 else non_null.mean()
-                except Exception:
-                    fill_value = non_null.median()
-                self.df[col] = series.fillna(fill_value)
-
-            elif pd.api.types.is_datetime64_any_dtype(series):
-                # Leave date NaTs as-is — filling dates is usually wrong
-                pass
-
-            else:
-                mode = series.mode()
-                if not mode.empty:
-                    self.df[col] = series.fillna(mode.iloc[0])
-
-    def remove_high_null_columns(self, threshold=0.6):
-        """Drop columns where more than `threshold` fraction of values are null."""
-        null_frac = self.df.isna().mean()
-        cols_to_drop = null_frac[null_frac > threshold].index.tolist()
-        self.df.drop(columns=cols_to_drop, inplace=True)
-        for col in cols_to_drop:
-            self.schema.pop(col, None)
-
-    def clean(self):
-        self.clean_column_names()
-        self.remove_duplicates()
-        self.remove_empty_columns()
-        self.remove_high_null_columns(threshold=0.6)
-        self.clean_numeric_columns()
-        self.clean_date_columns()
-        self.handle_missing_values()
-        return self.df, self.schema  # Return updated schema too
-
-
-analyzer.py
-import pandas as pd
-import numpy as np
-
-
-class DataAnalyzer:
-    def __init__(self, df, schema):
-        self.df = df
-        self.schema = schema
-
-    def dataset_summary(self):
-        return {
-            "Rows": len(self.df),
-            "Columns": len(self.df.columns),
-            "Missing Values": int(self.df.isnull().sum().sum()),
-            "Duplicate Rows": int(self.df.duplicated().sum()),
-        }
-
-    def numeric_analysis(self):
-        results = {}
-        numeric_cols = [col for col, dtype in self.schema.items() if dtype == "numeric"]
-
-        for col in numeric_cols:
-            if col not in self.df.columns:
-                continue
-            try:
-                s = self.df[col].dropna()
-                if len(s) == 0:
-                    continue
-                results[col] = {
-                    "Mean": round(float(s.mean()), 2),
-                    "Median": round(float(s.median()), 2),
-                    "Min": round(float(s.min()), 2),
-                    "Max": round(float(s.max()), 2),
-                    "Std": round(float(s.std()), 2),
-                    "Missing": int(self.df[col].isnull().sum()),
-                }
-            except Exception:
-                continue
-        return results
-
-    def categorical_analysis(self):
-        results = {}
-        categorical_cols = [col for col, dtype in self.schema.items() if dtype == "categorical"]
-
-        for col in categorical_cols:
-            if col not in self.df.columns:
-                continue
-            try:
-                mode = self.df[col].mode()
-                results[col] = {
-                    "Unique Values": int(self.df[col].nunique()),
-                    "Top Category": str(mode.iloc[0]) if not mode.empty else None,
-                }
-            except Exception:
-                continue
-        return results
-
-    def date_analysis(self):
-        results = {}
-        date_cols = [col for col, dtype in self.schema.items() if dtype == "date"]
-
-        for col in date_cols:
-            if col not in self.df.columns:
-                continue
-            try:
-                results[col] = {
-                    "Start": str(self.df[col].min()),
-                    "End": str(self.df[col].max()),
-                    "Range (days)": int((self.df[col].max() - self.df[col].min()).days)
-                    if pd.notnull(self.df[col].min()) and pd.notnull(self.df[col].max())
-                    else None,
-                }
-            except Exception:
-                continue
-        return results
-
-    def outlier_analysis(self):
-        outliers = {}
-        numeric_cols = [col for col, dtype in self.schema.items() if dtype == "numeric"]
-
-        for col in numeric_cols:
-            if col not in self.df.columns:
-                continue
-            try:
-                s = self.df[col].dropna()
-                if len(s) < 4:
-                    continue
-                q1, q3 = s.quantile(0.25), s.quantile(0.75)
-                iqr = q3 - q1
-                if iqr == 0:
-                    continue
-                lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
-                count = int(((self.df[col] < lower) | (self.df[col] > upper)).sum())
-                outliers[col] = count
-            except Exception:
-                continue
-        return outliers
-
-    def run_analysis(self):
-        return {
-            "Dataset Summary": self.dataset_summary(),
-            "Numeric Analysis": self.numeric_analysis(),
-            "Categorical Analysis": self.categorical_analysis(),
-            "Date Analysis": self.date_analysis(),
-            "Outlier Analysis": self.outlier_analysis(),
-        }
-
-profiler.py
-import pandas as pd
-
-
-class DatasetProfiler:
-
-    def __init__(self, df):
-        self.df = df
-
-    def generate_profile(self):
-        profile = {
-            "rows": len(self.df),
-            "columns": len(self.df.columns),
-            "duplicates": int(self.df.duplicated().sum()),
-            "missing_values": int(self.df.isna().sum().sum()),
-            "missing_pct": round(
-                self.df.isna().sum().sum() / max(self.df.shape[0] * self.df.shape[1], 1) * 100, 2
-            ),
-            "memory_usage_mb": round(
-                self.df.memory_usage(deep=True).sum() / (1024 * 1024), 2
-            ),
-            "column_types": self.df.dtypes.astype(str).to_dict(),
-        }
-        return profile
-
-    def quality_score(self):
-        score = 100.0
-        total_cells = self.df.shape[0] * self.df.shape[1]
-        if total_cells == 0:
-            return 0.0
-
-        missing_pct = self.df.isna().sum().sum() / total_cells * 100
-        duplicate_pct = self.df.duplicated().sum() / max(len(self.df), 1) * 100
-
-        score -= min(missing_pct * 0.5, 30)
-        score -= min(duplicate_pct * 0.5, 20)
-
-        return round(max(score, 0.0), 2)
-
-    def column_summary(self):
-        """Returns per-column null counts and fill rates — useful for display."""
-        summary = []
-        for col in self.df.columns:
-            null_count = int(self.df[col].isna().sum())
-            fill_rate = round((1 - null_count / max(len(self.df), 1)) * 100, 1)
-            summary.append({
-                "Column": col,
-                "Null Count": null_count,
-                "Fill Rate (%)": fill_rate,
-                "Dtype": str(self.df[col].dtype),
-            })
-        return summary
-
-relationship_engine.py
-import pandas as pd
-
-
-class RelationshipEngine:
-
-    def __init__(self, df, schema):
-        self.df = df
-        self.schema = schema
-
-    def get_numeric_columns(self):
-        return [
-            col for col, dtype in self.schema.items()
-            if dtype == "numeric" and col in self.df.columns
-        ]
-
-    def correlation_matrix(self):
-        numeric_cols = self.get_numeric_columns()
-        if len(numeric_cols) < 2:
-            return None
-        # Only use columns that have enough non-null values
-        valid_cols = [
-            col for col in numeric_cols
-            if self.df[col].notna().sum() >= 3
-        ]
-        if len(valid_cols) < 2:
-            return None
-        try:
-            return self.df[valid_cols].corr()
-        except Exception:
-            return None
-
-    def strong_relationships(self, threshold=0.7):
-        corr = self.correlation_matrix()
-        if corr is None:
-            return []
-        relationships = []
-        cols = corr.columns.tolist()
-
-        for i, col1 in enumerate(cols):
-            for col2 in cols[i + 1:]:
-                try:
-                    value = corr.loc[col1, col2]
-                    if pd.isna(value):
-                        continue
-                    if abs(value) >= threshold:
-                        relationships.append({
-                            "Column1": col1,
-                            "Column2": col2,
-                            "Correlation": round(float(value), 2),
-                        })
-                except Exception:
-                    continue
-
-        # Sort by absolute correlation descending
-        relationships.sort(key=lambda x: abs(x["Correlation"]), reverse=True)
-        return relationships
-
-
-recommendation_engine.py
-class RecommendationEngine:
-
-    def __init__(self, df, schema, max_categories=20):
-        self.df = df
-        self.schema = schema
-        self.max_categories = max_categories  # skip high-cardinality categoricals in bar charts
-
-    def recommend(self):
-        recommendations = []
-
-        numeric_cols = [
-            col for col, dtype in self.schema.items()
-            if dtype == "numeric" and col in self.df.columns
-        ]
-        categorical_cols = [
-            col for col, dtype in self.schema.items()
-            if dtype == "categorical" and col in self.df.columns
-            # Only use low-to-medium cardinality columns for bar charts
-            and self.df[col].nunique() <= self.max_categories
-        ]
-        date_cols = [
-            col for col, dtype in self.schema.items()
-            if dtype == "date" and col in self.df.columns
-        ]
-
-        # --- Histograms for every numeric column ---
-        for col in numeric_cols:
-            recommendations.append({"type": "histogram", "column": col})
-
-        # --- Box plots for numeric columns (good for outlier visual) ---
-        for col in numeric_cols:
-            recommendations.append({"type": "boxplot", "column": col})
-
-        # --- Scatter: top pairs only (avoid O(n²) explosion) ---
-        MAX_SCATTER = 6
-        scatter_count = 0
-        for i in range(len(numeric_cols)):
-            if scatter_count >= MAX_SCATTER:
-                break
-            for j in range(i + 1, len(numeric_cols)):
-                if scatter_count >= MAX_SCATTER:
-                    break
-                recommendations.append({
-                    "type": "scatter",
-                    "x": numeric_cols[i],
-                    "y": numeric_cols[j],
-                })
-                scatter_count += 1
-
-        # --- Bar charts: limit to avoid combinatorial explosion ---
-        MAX_BAR = 8
-        bar_count = 0
-        for cat in categorical_cols:
-            if bar_count >= MAX_BAR:
-                break
-            for num in numeric_cols[:4]:  # cap numeric cols considered
-                if bar_count >= MAX_BAR:
-                    break
-                recommendations.append({
-                    "type": "bar",
-                    "category": cat,
-                    "value": num,
-                })
-                bar_count += 1
-
-        # --- Time series ---
-        for date_col in date_cols:
-            for num_col in numeric_cols[:3]:
-                recommendations.append({
-                    "type": "line",
-                    "date": date_col,
-                    "value": num_col,
-                })
-
-        return recommendations
-
-visualizer.py
-import plotly.express as px
-import pandas as pd
-
-
-class Visualizer:
-    def __init__(self, df):
-        self.df = df
-
-    def histogram(self, column):
-        return px.histogram(
-            self.df,
-            x=column,
-            title=f"Distribution of {column}",
-            nbins=30,
-        )
-
-    def scatter(self, x, y):
-        # Sample large datasets for scatter to keep rendering fast
-        df_plot = self.df[[x, y]].dropna()
-        if len(df_plot) > 5000:
-            df_plot = df_plot.sample(5000, random_state=42)
-        return px.scatter(
-            df_plot,
-            x=x,
-            y=y,
-            title=f"{x} vs {y}",
-            opacity=0.6,
-        )
-
-    def bar(self, category, value, agg="mean", max_categories=20):
-        df_valid = self.df[[category, value]].dropna()
-        if df_valid.empty:
-            raise ValueError(f"No valid data for bar chart: {category} vs {value}")
-
-        grouped = (
-            df_valid
-            .groupby(category, observed=True)[value]
-            .agg(agg)
-            .reset_index()
-            .sort_values(value, ascending=False)
-        )
-
-        # Limit to top N categories so chart stays readable
-        if len(grouped) > max_categories:
-            grouped = grouped.head(max_categories)
-
-        return px.bar(
-            grouped,
-            x=category,
-            y=value,
-            title=f"Top {len(grouped)} {category} by {value} ({agg})",
-        )
-
-    def line(self, date_col, value_col, agg="sum"):
-        df_valid = self.df[[date_col, value_col]].dropna()
-        if df_valid.empty:
-            raise ValueError(f"No valid data for line chart: {date_col} vs {value_col}")
-
-        grouped = (
-            df_valid
-            .groupby(date_col)[value_col]
-            .agg(agg)
-            .reset_index()
-            .sort_values(date_col)
-        )
-        return px.line(
-            grouped,
-            x=date_col,
-            y=value_col,
-            title=f"{value_col} Over Time ({agg})",
-        )
-
-    def boxplot(self, column):
-        df_valid = self.df[[column]].dropna()
-        if df_valid.empty:
-            raise ValueError(f"No valid data for boxplot: {column}")
-        return px.box(
-            df_valid,
-            y=column,
-            title=f"Outlier Analysis — {column}",
-        )
-
-    def heatmap(self, correlation_matrix):
-        if correlation_matrix is None or correlation_matrix.empty:
-            return None
-        return px.imshow(
-            correlation_matrix,
-            text_auto=".2f",
-            aspect="auto",
-            title="Correlation Heatmap",
-            color_continuous_scale="RdBu_r",
-            zmin=-1,
-            zmax=1,
-        )
-
-insight_generator.py
-class InsightGenerator:
-    def __init__(self, df, schema, analysis_results, relationships):
-        self.df = df
-        self.schema = schema
-        self.analysis_results = analysis_results
-        self.relationships = relationships
-
-    def generate(self):
-        insights = []
-
-        # --- Dataset Summary ---
-        summary = self.analysis_results.get("Dataset Summary", {})
-        rows = summary.get("Rows", 0)
-        cols = summary.get("Columns", 0)
-        missing = summary.get("Missing Values", 0)
-        dupes = summary.get("Duplicate Rows", 0)
-
-        insights.append(f"📊 The dataset contains {rows:,} rows and {cols} columns.")
-
-        if missing > 0:
-            pct = round(missing / max(rows * cols, 1) * 100, 1)
-            insights.append(f"⚠️ {missing:,} missing values detected ({pct}% of all cells).")
-
-        if dupes > 0:
-            insights.append(f"🔁 {dupes:,} duplicate rows were found in the dataset.")
-
-        # --- Numeric Insights: only highlight notable columns ---
-        numeric = self.analysis_results.get("Numeric Analysis", {})
-        outliers = self.analysis_results.get("Outlier Analysis", {})
-
-        # Show insight for columns with high std relative to mean (high variability)
-        for col, stats in numeric.items():
-            mean = stats.get("Mean", 0)
-            std = stats.get("Std", 0)
-            max_val = stats.get("Max")
-            min_val = stats.get("Min")
-            missing_n = stats.get("Missing", 0)
-
-            if mean != 0:
-                cv = abs(std / mean)  # coefficient of variation
-                if cv > 0.5:
-                    insights.append(
-                        f"📈 **{col}** shows high variability (mean={mean}, std={std})."
-                    )
-                else:
-                    insights.append(
-                        f"📉 **{col}** is relatively stable (mean={mean}, range {min_val}–{max_val})."
-                    )
-
-            if missing_n > 0:
-                insights.append(f"⚠️ **{col}** has {missing_n:,} missing values.")
-
-            outlier_count = outliers.get(col, 0)
-            if outlier_count > 0:
-                pct = round(outlier_count / max(rows, 1) * 100, 1)
-                insights.append(
-                    f"🔍 {outlier_count:,} outliers detected in **{col}** ({pct}% of rows)."
-                )
-
-        # --- Categorical Insights ---
-        categorical = self.analysis_results.get("Categorical Analysis", {})
-        for col, stats in categorical.items():
-            unique = stats.get("Unique Values", 0)
-            top = stats.get("Top Category")
-            if top is not None:
-                insights.append(
-                    f"🏷️ **{col}** has {unique} unique values; most frequent: '{top}'."
-                )
-
-        # --- Date Insights ---
-        date_analysis = self.analysis_results.get("Date Analysis", {})
-        for col, stats in date_analysis.items():
-            start = stats.get("Start")
-            end = stats.get("End")
-            days = stats.get("Range (days)")
-            if days is not None:
-                insights.append(
-                    f"📅 **{col}** spans {days:,} days (from {start} to {end})."
-                )
-            else:
-                insights.append(f"📅 **{col}** spans from {start} to {end}.")
-
-        # --- Relationship Insights (top 5 only) ---
-        for rel in self.relationships[:5]:
-            direction = "positive" if rel["Correlation"] > 0 else "negative"
-            strength = "strong" if abs(rel["Correlation"]) > 0.85 else "moderate"
-            insights.append(
-                f"🔗 **{rel['Column1']}** and **{rel['Column2']}** have a "
-                f"{strength} {direction} correlation ({rel['Correlation']})."
-            )
-
-        if not insights:
-            insights.append("ℹ️ No major insights detected in this dataset.")
-
-        return insights
-
-
-app.py
 import streamlit as st
 import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import io
+import chardet
+from typing import Tuple, Dict, Any, List, Optional
+import re
 
-from analysis.loader import DatasetLoader
-from analysis.schema_detector import SchemaDetector
-from analysis.cleaner import DataCleaner
-from analysis.analyzer import DataAnalyzer
-from analysis.profiler import DatasetProfiler
-from analysis.relationship_engine import RelationshipEngine
-from analysis.recommendation_engine import RecommendationEngine
-from analysis.visualizer import Visualizer
-from analysis.insight_generator import InsightGenerator
-
-st.set_page_config(page_title="Dataset Analyzer", layout="wide")
-st.title("📊 Dataset Analysis Platform")
-
-uploaded_file = st.file_uploader(
-    "Upload CSV or Excel File", type=["csv", "xlsx", "xls"]
+# Page configuration
+st.set_page_config(
+    page_title="Dataset Analyzer Platform",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-if uploaded_file:
-    try:
-        # ── 1. Load ──────────────────────────────────────────────────────────
-        with st.spinner("Loading dataset..."):
-            df = DatasetLoader.load_file(uploaded_file)
+# Custom CSS for better styling
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2.5rem;
+        color: #1E88E5;
+        text-align: center;
+        margin-bottom: 1rem;
+    }
+    .sub-header {
+        font-size: 1.5rem;
+        color: #333;
+        margin-top: 1rem;
+        margin-bottom: 0.5rem;
+    }
+    .insight-card {
+        background-color: #f0f2f6;
+        padding: 1rem;
+        border-radius: 10px;
+        margin: 0.5rem 0;
+    }
+    .metric-card {
+        background-color: #e3f2fd;
+        padding: 1rem;
+        border-radius: 10px;
+        text-align: center;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-        st.success(f"✅ Dataset loaded: {df.shape[0]:,} rows × {df.shape[1]} columns")
 
-        with st.expander("📋 Raw Dataset Preview", expanded=True):
-            st.dataframe(df.head(20), use_container_width=True)
-
-        # ── 2. Initial Schema Detection ───────────────────────────────────
-        schema = SchemaDetector(df).detect_schema()
-
-        # ── 3. Clean (returns updated df AND schema) ──────────────────────
-        with st.spinner("Cleaning dataset..."):
-            df, schema = DataCleaner(df, schema).clean()
-
-        # ── 4. Re-detect schema on cleaned data ───────────────────────────
-        schema = SchemaDetector(df).detect_schema()
-
-        # ── 5. Profile ────────────────────────────────────────────────────
-        profiler = DatasetProfiler(df)
-        profile = profiler.generate_profile()
-        quality = profiler.quality_score()
-        col_summary = profiler.column_summary()
-
-        # ── 6. Analysis ───────────────────────────────────────────────────
-        analyzer = DataAnalyzer(df, schema)
-        analysis_results = analyzer.run_analysis()
-
-        # ── 7. Relationships ──────────────────────────────────────────────
-        relationship_engine = RelationshipEngine(df, schema)
-        correlation_matrix = relationship_engine.correlation_matrix()
-        relationships = relationship_engine.strong_relationships()
-
-        # ── 8. Insights ───────────────────────────────────────────────────
-        insights = InsightGenerator(df, schema, analysis_results, relationships).generate()
-
-        # ── UI Layout ─────────────────────────────────────────────────────
-
-        # Quality Score
-        st.header("🏅 Data Quality")
-        q_col1, q_col2, q_col3, q_col4 = st.columns(4)
-        q_col1.metric("Quality Score", f"{quality}/100")
-        q_col2.metric("Rows", f"{profile['rows']:,}")
-        q_col3.metric("Missing Values", f"{profile['missing_values']:,}")
-        q_col4.metric("Duplicates", f"{profile['duplicates']:,}")
-
-        # Schema
-        with st.expander("🔍 Detected Schema"):
-            schema_df = pd.DataFrame(
-                [{"Column": k, "Detected Type": v} for k, v in schema.items()]
-            )
-            st.dataframe(schema_df, use_container_width=True)
-
-        # Column-level profile
-        with st.expander("📐 Column Profile (Null Counts & Fill Rates)"):
-            st.dataframe(pd.DataFrame(col_summary), use_container_width=True)
-
-        # Analysis Results
-        with st.expander("📈 Numeric Analysis"):
-            numeric_data = analysis_results.get("Numeric Analysis", {})
-            if numeric_data:
-                st.dataframe(
-                    pd.DataFrame(numeric_data).T,
-                    use_container_width=True,
-                )
+class DatasetAnalyzer:
+    """Main class for dataset analysis operations"""
+    
+    def __init__(self, df: pd.DataFrame, filename: str = ""):
+        self.df = df
+        self.filename = filename
+        self.insights = []
+        
+    def get_basic_info(self) -> Dict[str, Any]:
+        """Get basic dataset information"""
+        return {
+            "rows": self.df.shape[0],
+            "columns": self.df.shape[1],
+            "memory_usage": self.df.memory_usage(deep=True).sum() / 1024**2,  # MB
+            "duplicates": self.df.duplicated().sum(),
+            "missing_values": self.df.isnull().sum().sum(),
+            "missing_percentage": (self.df.isnull().sum().sum() / (self.df.shape[0] * self.df.shape[1])) * 100
+        }
+    
+    def get_column_info(self) -> pd.DataFrame:
+        """Get detailed column information"""
+        dtype_counts = self.df.dtypes.value_counts().to_dict()
+        
+        col_info = []
+        for col in self.df.columns:
+            col_info.append({
+                "Column": col,
+                "Type": str(self.df[col].dtype),
+                "Unique Values": self.df[col].nunique(),
+                "Missing Values": self.df[col].isnull().sum(),
+                "Missing %": round((self.df[col].isnull().sum() / len(self.df)) * 100, 2),
+                "Sample Value": str(self.df[col].dropna().iloc[0]) if len(self.df[col].dropna()) > 0 else "NaN"
+            })
+        
+        return pd.DataFrame(col_info)
+    
+    def get_numeric_stats(self) -> pd.DataFrame:
+        """Get statistics for numeric columns"""
+        numeric_cols = self.df.select_dtypes(include=[np.number]).columns
+        if len(numeric_cols) > 0:
+            return self.df[numeric_cols].describe().T
+        return pd.DataFrame()
+    
+    def detect_schema(self) -> Dict[str, Any]:
+        """Detect and return schema information"""
+        schema = {
+            "column_count": len(self.df.columns),
+            "row_count": len(self.df),
+            "columns": {}
+        }
+        
+        for col in self.df.columns:
+            dtype = self.df[col].dtype
+            unique_count = self.df[col].nunique()
+            missing_count = self.df[col].isnull().sum()
+            
+            # Determine column role
+            if dtype in ['int64', 'float64']:
+                col_type = "numeric"
+            elif dtype == 'object':
+                if self.df[col].nunique() / len(self.df) < 0.05:
+                    col_type = "categorical"
+                else:
+                    col_type = "text"
+            elif 'datetime' in str(dtype):
+                col_type = "datetime"
             else:
-                st.info("No numeric columns detected.")
-
-        with st.expander("🏷️ Categorical Analysis"):
-            cat_data = analysis_results.get("Categorical Analysis", {})
-            if cat_data:
-                st.dataframe(
-                    pd.DataFrame(cat_data).T,
-                    use_container_width=True,
-                )
-            else:
-                st.info("No categorical columns detected.")
-
-        with st.expander("📅 Date Analysis"):
-            date_data = analysis_results.get("Date Analysis", {})
-            if date_data:
-                st.dataframe(
-                    pd.DataFrame(date_data).T,
-                    use_container_width=True,
-                )
-            else:
-                st.info("No date columns detected.")
-
-        # Insights
-        st.header("💡 Insights")
-        for insight in insights:
-            st.info(insight)
-
-        # Visualizations
-        st.header("📊 Recommended Visualizations")
-        visualizer = Visualizer(df)
-        recommendations = RecommendationEngine(df, schema).recommend()
-
-        MAX_GRAPHS = 12
-        graph_count = 0
-
-        for rec in recommendations:
-            if graph_count >= MAX_GRAPHS:
-                st.caption(f"Showing first {MAX_GRAPHS} charts. Adjust MAX_GRAPHS to see more.")
-                break
-            try:
-                fig = None
-                if rec["type"] == "histogram":
-                    fig = visualizer.histogram(rec["column"])
-                elif rec["type"] == "boxplot":
-                    fig = visualizer.boxplot(rec["column"])
-                elif rec["type"] == "scatter":
-                    fig = visualizer.scatter(rec["x"], rec["y"])
-                elif rec["type"] == "bar":
-                    fig = visualizer.bar(rec["category"], rec["value"], agg="mean")
-                elif rec["type"] == "line":
-                    fig = visualizer.line(rec["date"], rec["value"], agg="sum")
-
-                if fig is not None:
-                    st.plotly_chart(fig, use_container_width=True)
-                    graph_count += 1
-
-            except Exception as e:
-                # Only warn for non-trivial errors
-                if "No valid data" not in str(e):
-                    st.warning(f"Skipped chart ({rec.get('type', '?')}): {e}")
-
-        # Correlation Heatmap
-        st.header("🔥 Correlation Heatmap")
-        heatmap_fig = visualizer.heatmap(correlation_matrix)
-        if heatmap_fig is not None:
-            st.plotly_chart(heatmap_fig, use_container_width=True)
+                col_type = "other"
+            
+            schema["columns"][col] = {
+                "data_type": str(dtype),
+                "unique_values": int(unique_count),
+                "missing_values": int(missing_count),
+                "column_type": col_type,
+                "sample_values": self.df[col].dropna().head(3).tolist()
+            }
+        
+        return schema
+    
+    def generate_insights(self) -> List[str]:
+        """Generate automatic insights from the dataset"""
+        insights = []
+        
+        basic_info = self.get_basic_info()
+        
+        # Basic dataset insights
+        insights.append(f"Dataset contains **{basic_info['rows']:,}** rows and **{basic_info['columns']}** columns.")
+        
+        if basic_info['missing_values'] > 0:
+            insights.append(f"Found **{basic_info['missing_values']:,}** missing values ({basic_info['missing_percentage']:.1f}% of total data).")
         else:
-            st.info("Not enough numeric columns to generate a correlation heatmap.")
+            insights.append("No missing values found in the dataset.")
+        
+        if basic_info['duplicates'] > 0:
+            insights.append(f"Detected **{basic_info['duplicates']:,}** duplicate rows.")
+        else:
+            insights.append("No duplicate rows found.")
+        
+        # Column type insights
+        numeric_cols = self.df.select_dtypes(include=[np.number]).columns.tolist()
+        categorical_cols = self.df.select_dtypes(include=['object']).columns.tolist()
+        
+        insights.append(f"Contains **{len(numeric_cols)}** numeric columns and **{len(categorical_cols)}** categorical columns.")
+        
+        # Insights about numeric columns
+        for col in numeric_cols[:3]:  # Top 3 numeric columns
+            stats = self.df[col].describe()
+            insights.append(f"Column '{col}': range [{stats['min']:.2f}, {stats['max']:.2f}], mean={stats['mean']:.2f}")
+        
+        # High cardinality detection
+        for col in categorical_cols[:3]:
+            unique_pct = (self.df[col].nunique() / len(self.df)) * 100
+            if unique_pct > 50:
+                insights.append(f"Column '{col}' has high cardinality ({self.df[col].nunique():,} unique values).")
+        
+        # Correlation insight (if enough numeric columns)
+        if len(numeric_cols) >= 2:
+            corr_matrix = self.df[numeric_cols].corr()
+            # Find highest correlation
+            for i in range(len(corr_matrix.columns)):
+                for j in range(i+1, len(corr_matrix.columns)):
+                    corr_val = corr_matrix.iloc[i, j]
+                    if abs(corr_val) > 0.7:
+                        insights.append(f"🔗 Strong correlation ({corr_val:.2f}) between '{corr_matrix.columns[i]}' and '{corr_matrix.columns[j]}'.")
+        
+        return insights
+    
+    def create_visualizations(self):
+        """Create various visualizations based on data types"""
+        plots = {}
+        
+        numeric_cols = self.df.select_dtypes(include=[np.number]).columns.tolist()
+        categorical_cols = self.df.select_dtypes(include=['object']).columns.tolist()
+        
+        # 1. Distribution of numeric columns
+        if numeric_cols:
+            # Limit to first 3 numeric columns for distribution plots
+            for col in numeric_cols[:3]:
+                fig = px.histogram(
+                    self.df, x=col, nbins=50, 
+                    title=f"Distribution of {col}",
+                    labels={col: col, "count": "Frequency"},
+                    color_discrete_sequence=["#1E88E5"]
+                )
+                fig.update_layout(height=400)
+                plots[f"dist_{col}"] = fig
+        
+        # 2. Box plots for numeric columns
+        if len(numeric_cols) >= 2:
+            # Melt for boxplot
+            numeric_subset = self.df[numeric_cols[:5]]  # Limit to first 5
+            melted = numeric_subset.melt(var_name="Variable", value_name="Value")
+            fig = px.box(
+                melted, x="Variable", y="Value",
+                title="Box Plots for Numeric Columns",
+                color="Variable"
+            )
+            fig.update_layout(height=450)
+            plots["boxplots"] = fig
+        
+        # 3. Correlation heatmap
+        if len(numeric_cols) >= 2:
+            corr_matrix = self.df[numeric_cols].corr()
+            fig = px.imshow(
+                corr_matrix, 
+                text_auto=True, 
+                aspect="auto",
+                title="Correlation Heatmap",
+                color_continuous_scale="RdBu_r",
+                zmin=-1, zmax=1
+            )
+            fig.update_layout(height=500)
+            plots["correlation"] = fig
+        
+        # 4. Categorical column distributions
+        if categorical_cols:
+            for col in categorical_cols[:2]:  # Limit to first 2 categorical columns
+                value_counts = self.df[col].value_counts().head(15)  # Top 15 categories
+                fig = px.bar(
+                    x=value_counts.values, 
+                    y=value_counts.index,
+                    orientation='h',
+                    title=f"Top Categories in {col}",
+                    labels={"x": "Count", "y": col},
+                    color=value_counts.values,
+                    color_continuous_scale="Blues"
+                )
+                fig.update_layout(height=400)
+                plots[f"cat_{col}"] = fig
+        
+        # 5. Missing values heatmap
+        if self.df.isnull().sum().sum() > 0:
+            missing_data = self.df.isnull().astype(int)
+            fig = px.imshow(
+                missing_data.T,
+                title="Missing Values Heatmap",
+                labels={"x": "Row Index", "y": "Column"},
+                color_continuous_scale=["#2ecc71", "#e74c3c"],
+                aspect="auto"
+            )
+            fig.update_layout(height=max(300, len(self.df.columns) * 20))
+            plots["missing"] = fig
+        
+        return plots
 
-        # Strong Relationships Table
-        if relationships:
-            st.header("🔗 Strong Correlations (|r| ≥ 0.7)")
-            st.dataframe(pd.DataFrame(relationships), use_container_width=True)
+class DataCleaner:
+    """Handles data cleaning operations"""
+    
+    @staticmethod
+    def remove_duplicates(df: pd.DataFrame) -> pd.DataFrame:
+        return df.drop_duplicates()
+    
+    @staticmethod
+    def handle_missing_values(df: pd.DataFrame, strategy: str = "drop", columns: List[str] = None) -> pd.DataFrame:
+        df_clean = df.copy()
+        
+        if columns is None:
+            cols_to_handle = df.columns
+        else:
+            cols_to_handle = [c for c in columns if c in df.columns]
+        
+        if strategy == "drop":
+            df_clean = df_clean.dropna(subset=cols_to_handle)
+        elif strategy == "fill_mean":
+            for col in cols_to_handle:
+                if df_clean[col].dtype in ['int64', 'float64']:
+                    df_clean[col] = df_clean[col].fillna(df_clean[col].mean())
+        elif strategy == "fill_median":
+            for col in cols_to_handle:
+                if df_clean[col].dtype in ['int64', 'float64']:
+                    df_clean[col] = df_clean[col].fillna(df_clean[col].median())
+        elif strategy == "fill_mode":
+            for col in cols_to_handle:
+                df_clean[col] = df_clean[col].fillna(df_clean[col].mode()[0] if len(df_clean[col].mode()) > 0 else "Unknown")
+        elif strategy == "fill_constant":
+            for col in cols_to_handle:
+                df_clean[col] = df_clean[col].fillna(0)
+        
+        return df_clean
+    
+    @staticmethod
+    def convert_data_types(df: pd.DataFrame) -> pd.DataFrame:
+        """Attempt to convert columns to appropriate data types"""
+        df_clean = df.copy()
+        
+        for col in df_clean.columns:
+            # Try to convert to numeric
+            if df_clean[col].dtype == 'object':
+                try:
+                    df_clean[col] = pd.to_numeric(df_clean[col])
+                except:
+                    pass
+                
+                # Try to convert to datetime
+                if df_clean[col].dtype == 'object':
+                    try:
+                        df_clean[col] = pd.to_datetime(df_clean[col])
+                    except:
+                        pass
+        
+        return df_clean
+    
+    @staticmethod
+    def remove_outliers(df: pd.DataFrame, columns: List[str] = None, method: str = "iqr") -> pd.DataFrame:
+        """Remove outliers using IQR or Z-score method"""
+        df_clean = df.copy()
+        
+        if columns is None:
+            columns = df.select_dtypes(include=[np.number]).columns.tolist()
+        
+        for col in columns:
+            if col in df_clean.columns and df_clean[col].dtype in ['int64', 'float64']:
+                if method == "iqr":
+                    Q1 = df_clean[col].quantile(0.25)
+                    Q3 = df_clean[col].quantile(0.75)
+                    IQR = Q3 - Q1
+                    lower_bound = Q1 - 1.5 * IQR
+                    upper_bound = Q3 + 1.5 * IQR
+                    df_clean = df_clean[(df_clean[col] >= lower_bound) & (df_clean[col] <= upper_bound)]
+                elif method == "zscore":
+                    mean = df_clean[col].mean()
+                    std = df_clean[col].std()
+                    df_clean = df_clean[abs(df_clean[col] - mean) <= 3 * std]
+        
+        return df_clean
 
-    except Exception as e:
-        st.error(f"❌ Error: {str(e)}")
-        st.exception(e)  # Show full traceback in dev mode
+
+def load_dataset(uploaded_file) -> Tuple[pd.DataFrame, str]:
+    """Load dataset from uploaded CSV or Excel file"""
+    file_extension = uploaded_file.name.split('.')[-1].lower()
+    
+    if file_extension == 'csv':
+        # Detect encoding for CSV
+        raw_data = uploaded_file.getvalue()
+        result = chardet.detect(raw_data)
+        encoding = result['encoding'] if result['encoding'] else 'utf-8'
+        
+        # Try to read with detected encoding
+        try:
+            df = pd.read_csv(io.BytesIO(raw_data), encoding=encoding)
+        except:
+            df = pd.read_csv(io.BytesIO(raw_data), encoding='utf-8', engine='python')
+        
+    elif file_extension in ['xlsx', 'xls']:
+        df = pd.read_excel(uploaded_file)
+    else:
+        raise ValueError(f"Unsupported file type: {file_extension}. Please upload CSV or Excel files only.")
+    
+    return df, uploaded_file.name
 
 
+def main():
+    """Main Streamlit application"""
+    
+    # Header
+    st.markdown('<div class="main-header">Dataset Analyzer Platform</div>', unsafe_allow_html=True)
+    st.markdown("---")
+    
+    # Sidebar
+    with st.sidebar:
+        st.markdown("Upload Dataset")
+        uploaded_file = st.file_uploader(
+            "Choose a file (CSV or Excel)",
+            type=['csv', 'xlsx', 'xls'],
+            help="Upload your CSV or Excel dataset to begin analysis"
+        )
+        
+        st.markdown("---")
+        st.markdown("## 🛠️ Data Cleaning Options")
+        
+        if 'current_df' in st.session_state and st.session_state.current_df is not None:
+            cleaning_tab = st.radio(
+                "Choose cleaning operation",
+                ["None", "Remove Duplicates", "Handle Missing Values", "Convert Data Types", "Remove Outliers"]
+            )
+            
+            if cleaning_tab == "Handle Missing Values":
+                missing_strategy = st.selectbox(
+                    "Strategy for missing values",
+                    ["drop", "fill_mean", "fill_median", "fill_mode", "fill_constant"]
+                )
+                if st.button("Apply Missing Value Handling"):
+                    with st.spinner("Cleaning data..."):
+                        cleaner = DataCleaner()
+                        st.session_state.current_df = cleaner.handle_missing_values(
+                            st.session_state.current_df, missing_strategy
+                        )
+                        st.success("Missing values handled successfully!")
+                        st.rerun()
+            
+            elif cleaning_tab == "Remove Duplicates":
+                if st.button("Remove Duplicate Rows"):
+                    with st.spinner("Removing duplicates..."):
+                        cleaner = DataCleaner()
+                        st.session_state.current_df = cleaner.remove_duplicates(st.session_state.current_df)
+                        st.success("Duplicates removed successfully!")
+                        st.rerun()
+            
+            elif cleaning_tab == "Convert Data Types":
+                if st.button("Auto-convert Data Types"):
+                    with st.spinner("Converting data types..."):
+                        cleaner = DataCleaner()
+                        st.session_state.current_df = cleaner.convert_data_types(st.session_state.current_df)
+                        st.success("Data types converted successfully!")
+                        st.rerun()
+            
+            elif cleaning_tab == "Remove Outliers":
+                outlier_method = st.selectbox("Outlier detection method", ["iqr", "zscore"])
+                if st.button("Remove Outliers"):
+                    with st.spinner("Removing outliers..."):
+                        cleaner = DataCleaner()
+                        numeric_cols = st.session_state.current_df.select_dtypes(include=[np.number]).columns.tolist()
+                        if numeric_cols:
+                            st.session_state.current_df = cleaner.remove_outliers(
+                                st.session_state.current_df, numeric_cols, outlier_method
+                            )
+                            st.success("Outliers removed successfully!")
+                            st.rerun()
+                        else:
+                            st.warning("No numeric columns found for outlier removal.")
+        
+        st.markdown("---")
+        st.markdown("About")
+        st.info(
+            "This platform automatically detects dataset structure, "
+            "provides cleaning tools, generates visualizations, and "
+            "extracts meaningful insights from your CSV or Excel data."
+        )
+    
+    # Main content area
+    if uploaded_file is not None:
+        try:
+            # Load dataset if not already loaded or file changed
+            if 'current_df' not in st.session_state or 'current_file' not in st.session_state or st.session_state.current_file != uploaded_file.name:
+                with st.spinner("Loading dataset..."):
+                    df, filename = load_dataset(uploaded_file)
+                    st.session_state.current_df = df
+                    st.session_state.current_file = filename
+                    st.session_state.original_df = df.copy()
+                    st.success(f"Dataset '{filename}' loaded successfully!")
+            
+            df = st.session_state.current_df
+            
+            # Create analyzer instance
+            analyzer = DatasetAnalyzer(df, st.session_state.current_file)
+            
+            # Tabs for different sections
+            tab1, tab2, tab3, tab4, tab5 = st.tabs([
+                "Dataset Overview", 
+                "Schema Detection", 
+                "Visualizations", 
+                "Insights",
+                "Export"
+            ])
+            
+            with tab1:
+                st.markdown('<div class="sub-header">Dataset Overview</div>', unsafe_allow_html=True)
+                
+                # Metrics row
+                col1, col2, col3, col4 = st.columns(4)
+                basic_info = analyzer.get_basic_info()
+                
+                with col1:
+                    st.markdown(f"""
+                    <div class="metric-card">
+                        <h3>{basic_info['rows']:,}</h3>
+                        <p>Rows</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                with col2:
+                    st.markdown(f"""
+                    <div class="metric-card">
+                        <h3>{basic_info['columns']}</h3>
+                        <p>Columns</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                with col3:
+                    st.markdown(f"""
+                    <div class="metric-card">
+                        <h3>{basic_info['missing_values']:,}</h3>
+                        <p>Missing Values</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                with col4:
+                    st.markdown(f"""
+                    <div class="metric-card">
+                        <h3>{basic_info['duplicates']:,}</h3>
+                        <p>Duplicate Rows</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                st.markdown("---")
+                
+                # Data Preview
+                st.markdown("Data Preview")
+                st.dataframe(df.head(20), use_container_width=True)
+                
+                # Column Information
+                st.markdown("Column Information")
+                col_info_df = analyzer.get_column_info()
+                st.dataframe(col_info_df, use_container_width=True)
+                
+                # Numeric Statistics
+                numeric_stats = analyzer.get_numeric_stats()
+                if not numeric_stats.empty:
+                    st.markdown("Numeric Column Statistics")
+                    st.dataframe(numeric_stats, use_container_width=True)
+                
+                # Memory usage
+                st.markdown(f"**Memory Usage:** {basic_info['memory_usage']:.2f} MB")
+            
+            with tab2:
+                st.markdown('<div class="sub-header">Schema Detection</div>', unsafe_allow_html=True)
+                
+                schema = analyzer.detect_schema()
+                
+                st.markdown(f"""
+                <div class="insight-card">
+                    <b>Dataset Structure:</b><br>
+                    • Total Columns: {schema['column_count']}<br>
+                    • Total Rows: {schema['row_count']:,}<br>
+                    • Density: {(1 - basic_info['missing_percentage']/100):.1%} complete
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Display schema as JSON with better formatting
+                st.json(schema)
+                
+                # Data type distribution
+                st.markdown("Data Type Distribution")
+                dtype_counts = df.dtypes.astype(str).value_counts()
+                fig = px.pie(
+                    values=dtype_counts.values, 
+                    names=dtype_counts.index,
+                    title="Column Data Types Distribution",
+                    color_discrete_sequence=px.colors.qualitative.Set3
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            
+            with tab3:
+                st.markdown('<div class="sub-header">Visualizations</div>', unsafe_allow_html=True)
+                
+                plots = analyzer.create_visualizations()
+                
+                if plots:
+                    for plot_name, fig in plots.items():
+                        st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("Not enough data to generate visualizations. Need at least one numeric column.")
+            
+            with tab4:
+                st.markdown('<div class="sub-header">Automated Insights</div>', unsafe_allow_html=True)
+                
+                insights = analyzer.generate_insights()
+                
+                for insight in insights:
+                    st.markdown(f'<div class="insight-card">{insight}</div>', unsafe_allow_html=True)
+                
+                # Additional analysis suggestions
+                st.markdown("---")
+                st.markdown("Suggested Next Steps")
+                
+                numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+                categorical_cols = df.select_dtypes(include=['object']).columns.tolist()
+                
+                suggestions = []
+                if len(numeric_cols) >= 2:
+                    suggestions.append("• Perform correlation analysis to identify relationships between numeric variables")
+                if len(categorical_cols) >= 1 and len(numeric_cols) >= 1:
+                    suggestions.append("• Analyze how categorical variables affect numeric outcomes")
+                if basic_info['missing_values'] > 0:
+                    suggestions.append("• Consider imputing missing values or analyzing missing data patterns")
+                if basic_info['duplicates'] > 0:
+                    suggestions.append("• Review duplicate rows to understand data quality issues")
+                if df.select_dtypes(include=['datetime']).columns.tolist():
+                    suggestions.append("• Perform time series analysis on datetime columns")
+                
+                for suggestion in suggestions:
+                    st.markdown(suggestion)
+            
+            with tab5:
+                st.markdown('<div class="sub-header">Export Cleaned Dataset</div>', unsafe_allow_html=True)
+                
+                export_format = st.selectbox("Select export format", ["CSV", "Excel"])
+                
+                if st.button("Export Dataset"):
+                    with st.spinner("Preparing download..."):
+                        if export_format == "CSV":
+                            csv = df.to_csv(index=False)
+                            st.download_button(
+                                label="Download CSV",
+                                data=csv,
+                                file_name=f"cleaned_dataset_{st.session_state.current_file.split('.')[0]}.csv",
+                                mime="text/csv"
+                            )
+                        elif export_format == "Excel":
+                            output = io.BytesIO()
+                            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                                df.to_excel(writer, index=False, sheet_name='Cleaned_Data')
+                            st.download_button(
+                                label="Download Excel",
+                                data=output.getvalue(),
+                                file_name=f"cleaned_dataset_{st.session_state.current_file.split('.')[0]}.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            )
+                
+                st.markdown("---")
+                st.markdown("Reset to Original")
+                if st.button("Reset to Original Dataset"):
+                    st.session_state.current_df = st.session_state.original_df.copy()
+                    st.success("Dataset reset to original!")
+                    st.rerun()
+        
+        except Exception as e:
+            st.error(f"Error loading dataset: {str(e)}")
+            st.info("Please make sure your file is properly formatted (CSV or Excel).")
+    
+    else:
+        # Empty state
+        st.info("upload a CSV or Excel file to begin analysis.")
+        
+        # Sample data info
+        with st.expander("Supported File Formats & Tips"):
+            st.markdown("""
+            **Supported Formats:**
+            - CSV (auto-detects encoding)
+            - Excel (.xlsx, .xls)
+            
+            **Tips for best results:**
+            - Ensure your data has a header row
+            - Clean data is better analyzed
+            - Large datasets (>100MB) may take longer to process
+            - The platform handles various data types automatically
+            """)
+    
+    # Footer
+    st.markdown("---")
+    st.markdown(
+        "<p style='text-align: center; color: gray;'>Dataset Analyzer Platform | Dynamic Data Intelligence</p>",
+        unsafe_allow_html=True
+    )
 
 
-
-
+if __name__ == "__main__":
+    main()
