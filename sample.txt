@@ -56,3 +56,42 @@ def load_dataset(uploaded_file) -> Tuple[pd.DataFrame, str]:
     df_cleaned = df_cleaned.loc[:, ~df_cleaned.columns.str.startswith('Unnamed:')]
 
     return df_cleaned, uploaded_file.name
+
+
+
+
+
+Detected columns:
+
+[
+0:"Fleet Group"
+1:"(All)"
+]
+Detected Schema
+{
+"Fleet Group":"categorical"
+"(All)":"categorical"
+}
+Dataset Analysis
+{
+"Dataset Summary":{
+"Rows":12
+"Columns":2
+"Missing Values":0
+"Duplicate Rows":1
+}
+"Numeric Analysis":{}
+"Categorical Analysis":{
+"Fleet Group":{
+"Unique Values":11
+"Top Category":"Aircraft Type Y/N"
+}
+"(All)":{
+"Unique Values":7
+"Top Category":"Y"
+}
+}
+"Date Analysis":{}
+"Outlier Analysis":{}
+}
+
