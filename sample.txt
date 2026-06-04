@@ -1,15 +1,58 @@
-Detected columns:
+def load_dataset(uploaded_file) -> Tuple[pd.DataFrame, str]:
+    """
+    Load dataset from uploaded file, automatically detecting and bypassing 
+    leading metadata or empty rows to find the true header.
+    """
+    file_extension = uploaded_file.name.split('.')[-1].lower()
+    df_raw = None
+    
+    # 1. Read the raw file entirely without assuming a header row yet
+    if file_extension == 'csv':
+        raw_data = uploaded_file.getvalue()
+        result = chardet.detect(raw_data)
+        encoding = result['encoding'] if result['encoding'] else 'utf-8'
+        try:
+            df_raw = pd.read_csv(io.BytesIO(raw_data), encoding=encoding, header=None)
+        except:
+            df_raw = pd.read_csv(io.BytesIO(raw_data), encoding='utf-8', engine='python', header=None)
+        
+    elif file_extension in ['xlsx', 'xls']:
+        df_raw = pd.read_excel(uploaded_file, header=None)
+    elif file_extension == 'json':
+        df = pd.read_json(uploaded_file)
+        return df, uploaded_file.name
+    else:
+        raise ValueError(f"Unsupported file type: {file_extension}")
+    
+    if df_raw is None or df_raw.empty:
+        return df_raw, uploaded_file.name
 
-[
-0:"1A"
-1:"CF34-1A"
-2:"Unnamed: 2"
-3:"B2"
-4:"F110-132"
-]
-Detected Schema
-{
-"1A":"categorical"
-"CF34-1A":"categorical"
-"B2":"numeric"
-"F110-132":"categorical"
+    # 2. Smart Header Detection Logic
+    # Find the first row that isn't completely empty and looks like a header
+    header_row_idx = 0
+    for idx, row in df_raw.iterrows():
+        # Drop NaN values from the current row to see actual content
+        valid_cells = row.dropna().tolist()
+        
+        # If the row has content, and a good portion of it contains text/strings,
+        # it's highly likely our column header row.
+        if len(valid_cells) > 0:
+            string_cells = [str(c) for c in valid_cells if not str(c).strip().replace('.', '', 1).isdigit()]
+            # If the row is predominantly text or contains distinct labels, select it
+            if len(string_cells) >= len(valid_cells) * 0.5 or idx == df_raw.dropna(how='all').index[0]:
+                header_row_idx = idx
+                break
+
+    # 3. Reconstruct the Dataframe from the true header downward
+    df_cleaned = df_raw.iloc[header_row_idx:].reset_index(drop=True)
+    
+    # Assign the discovered row values as column names
+    df_cleaned.columns = df_cleaned.iloc[0]
+    df_cleaned = df_cleaned[1:].reset_index(drop=True)
+    
+    # 4. Clean up any corrupted columns (e.g., Unnamed columns or trailing completely empty spaces)
+    df_cleaned = df_cleaned.loc[:, df_cleaned.columns.notna()]
+    df_cleaned.columns = [str(c).strip() for c in df_cleaned.columns]
+    df_cleaned = df_cleaned.loc[:, ~df_cleaned.columns.str.startswith('Unnamed:')]
+
+    return df_cleaned, uploaded_file.name
