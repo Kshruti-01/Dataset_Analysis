@@ -382,9 +382,8 @@ class DataCleaner:
 
 def load_dataset(uploaded_file) -> Tuple[pd.DataFrame, str]:
     """
-    Absolute non-destructive spreadsheet loader.
-    Guarantees that columns A through G are completely preserved, 
-    regardless of data metrics or missing labels on the header line.
+    Literal raw spreadsheet parser.
+    Keeps all column profiles completely untouched. No transpositions allowed.
     """
     file_extension = uploaded_file.name.split('.')[-1].lower()
     df_raw = None
@@ -398,6 +397,7 @@ def load_dataset(uploaded_file) -> Tuple[pd.DataFrame, str]:
         except:
             df_raw = pd.read_csv(io.BytesIO(raw_data), encoding='utf-8', engine='python', header=None)
     elif file_extension in ['xlsx', 'xls']:
+        # 🛠️ Read explicitly from cell coordinate (0,0) down to avoid automatic trimming
         df_raw = pd.read_excel(uploaded_file, header=None)
     else:
         raise ValueError(f"Unsupported file type: .{file_extension}")
@@ -405,18 +405,17 @@ def load_dataset(uploaded_file) -> Tuple[pd.DataFrame, str]:
     if df_raw is None or df_raw.empty:
         return df_raw, uploaded_file.name
 
-    # 1. DO NOT drop individual sparse rows/columns anymore. Keep the native physical file layout intact.
-    # Look for the very first row containing any text/data that represents row 0.
+    # Step 1: Find the first non-empty structural row to use as column definitions
     header_row_idx = 0
     for idx, row in df_raw.iterrows():
         if row.notna().any():
             header_row_idx = idx
             break
 
-    # 2. Slice data starting exactly at that row index
+    # Step 2: Extract data from that row index down
     df_cleaned = df_raw.iloc[header_row_idx:].reset_index(drop=True)
     
-    # 3. Rebuild headers safely without dropping any column vectors from index 0 to max shape
+    # Step 3: Map headers systematically across ALL columns present in the file
     raw_headers = []
     for col_pos in range(df_cleaned.shape[1]):
         val = df_cleaned.iloc[0, col_pos]
@@ -430,17 +429,8 @@ def load_dataset(uploaded_file) -> Tuple[pd.DataFrame, str]:
     df_cleaned.columns = raw_headers
     df_cleaned = df_cleaned[1:].reset_index(drop=True)
 
-    # 4. Strictly evaluate isolated key-value behavior (Transposition check)
-    # ONLY apply transposition if the entire extracted file has exactly 2 columns of track width.
-    if df_cleaned.shape[1] == 2:
-        first_col_values = df_cleaned.iloc[:, 0].dropna().tolist()
-        if len(set(first_col_values)) == len(first_col_values) and len(first_col_values) > 1:
-            df_transposed = df_cleaned.set_index(df_cleaned.columns[0]).T
-            df_transposed.columns.name = None
-            df_transposed = df_transposed.reset_index(drop=True)
-            df_transposed.columns = [str(c).strip() for c in df_transposed.columns]
-            return df_transposed, uploaded_file.name
-
+    # 🛠️ FIXED: Removed all transposition logic blocks entirely.
+    # The application will now strictly display the tabular file exactly as it is structured on disk.
     return df_cleaned, uploaded_file.name
 
 
