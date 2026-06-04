@@ -382,8 +382,9 @@ class DataCleaner:
 
 def load_dataset(uploaded_file) -> Tuple[pd.DataFrame, str]:
     """
-    Safe dataset layout parser that preserves all physical spreadsheet tracks (A-G).
-    Replaces destructive drop rules with dynamic header repairs.
+    Absolute non-destructive spreadsheet loader.
+    Guarantees that columns A through G are completely preserved, 
+    regardless of data metrics or missing labels on the header line.
     """
     file_extension = uploaded_file.name.split('.')[-1].lower()
     df_raw = None
@@ -399,54 +400,41 @@ def load_dataset(uploaded_file) -> Tuple[pd.DataFrame, str]:
     elif file_extension in ['xlsx', 'xls']:
         df_raw = pd.read_excel(uploaded_file, header=None)
     else:
-        raise ValueError(f"Unsupported file type: .{file_extension}. Please upload a CSV or Excel file.")
+        raise ValueError(f"Unsupported file type: .{file_extension}")
     
     if df_raw is None or df_raw.empty:
         return df_raw, uploaded_file.name
 
-    # Step 1: Only drop completely dead space rows/columns (where 100% of values are NaN)
-    df_raw = df_raw.dropna(how='all', axis=0).dropna(how='all', axis=1).reset_index(drop=True)
-
-    if df_raw.empty:
-        return df_raw, uploaded_file.name
-
-    # Step 2: Find the main header row index safely
+    # 1. DO NOT drop individual sparse rows/columns anymore. Keep the native physical file layout intact.
+    # Look for the very first row containing any text/data that represents row 0.
     header_row_idx = 0
     for idx, row in df_raw.iterrows():
-        valid_cells = row.dropna().tolist()
-        if len(valid_cells) > 0:
-            string_cells = [str(c) for c in valid_cells if not str(c).strip().replace('.', '', 1).isdigit()]
-            if len(string_cells) >= len(valid_cells) * 0.3 or idx == df_raw.dropna(how='all').index[0]:
-                header_row_idx = idx
-                break
+        if row.notna().any():
+            header_row_idx = idx
+            break
 
-    # Step 3: Slice data from header down
+    # 2. Slice data starting exactly at that row index
     df_cleaned = df_raw.iloc[header_row_idx:].reset_index(drop=True)
     
-    # Step 4: Generate explicit header strings safely without losing columns
+    # 3. Rebuild headers safely without dropping any column vectors from index 0 to max shape
     raw_headers = []
     for col_pos in range(df_cleaned.shape[1]):
-        header_val = str(df_cleaned.iloc[0, col_pos]).strip()
+        val = df_cleaned.iloc[0, col_pos]
+        header_str = str(val).strip() if pd.notna(val) else ""
         
-        # If the header value is empty, invalid, or parsed as NaN, substitute a clean label index
-        if header_val.lower() in ['nan', 'none', ''] or header_val.startswith('Unnamed:'):
+        if header_str.lower() in ['nan', 'none', ''] or header_str.startswith('Unnamed:'):
             raw_headers.append(f"Column_{col_pos + 1}")
         else:
-            raw_headers.append(header_val)
+            raw_headers.append(header_str)
             
     df_cleaned.columns = raw_headers
     df_cleaned = df_cleaned[1:].reset_index(drop=True)
 
-    # 🛠️ FIXED CRITICAL POINT:
-    # We no longer execute column filtering code blocks that look for "Unnamed:" or "nan". 
-    # Columns A through G are now fully preserved even if their header properties are messy.
-
-    # Step 5: Check for structural side-aligned metadata blocks (Transposition check)
+    # 4. Strictly evaluate isolated key-value behavior (Transposition check)
+    # ONLY apply transposition if the entire extracted file has exactly 2 columns of track width.
     if df_cleaned.shape[1] == 2:
         first_col_values = df_cleaned.iloc[:, 0].dropna().tolist()
-        unique_keys_count = len(set(first_col_values))
-        
-        if unique_keys_count == len(first_col_values) and len(first_col_values) > 1:
+        if len(set(first_col_values)) == len(first_col_values) and len(first_col_values) > 1:
             df_transposed = df_cleaned.set_index(df_cleaned.columns[0]).T
             df_transposed.columns.name = None
             df_transposed = df_transposed.reset_index(drop=True)
