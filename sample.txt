@@ -1,12 +1,12 @@
 def load_dataset(uploaded_file) -> Tuple[pd.DataFrame, str]:
     """
-    Load dataset from uploaded file, automatically detecting and bypassing 
-    leading metadata or empty rows to find the true header.
+    Load dataset from uploaded file, with advanced automated handling for 
+    leading metadata rows, standard vertical tables, and transposed/key-value data blocks.
     """
     file_extension = uploaded_file.name.split('.')[-1].lower()
     df_raw = None
     
-    # 1. Read the raw file entirely without assuming a header row yet
+    # 1. Read the raw document structure without predefined assumptions
     if file_extension == 'csv':
         raw_data = uploaded_file.getvalue()
         result = chardet.detect(raw_data)
@@ -27,71 +27,45 @@ def load_dataset(uploaded_file) -> Tuple[pd.DataFrame, str]:
     if df_raw is None or df_raw.empty:
         return df_raw, uploaded_file.name
 
-    # 2. Smart Header Detection Logic
-    # Find the first row that isn't completely empty and looks like a header
+    # 2. Identify and isolate the true content boundary
     header_row_idx = 0
     for idx, row in df_raw.iterrows():
-        # Drop NaN values from the current row to see actual content
         valid_cells = row.dropna().tolist()
-        
-        # If the row has content, and a good portion of it contains text/strings,
-        # it's highly likely our column header row.
         if len(valid_cells) > 0:
             string_cells = [str(c) for c in valid_cells if not str(c).strip().replace('.', '', 1).isdigit()]
-            # If the row is predominantly text or contains distinct labels, select it
             if len(string_cells) >= len(valid_cells) * 0.5 or idx == df_raw.dropna(how='all').index[0]:
                 header_row_idx = idx
                 break
 
-    # 3. Reconstruct the Dataframe from the true header downward
     df_cleaned = df_raw.iloc[header_row_idx:].reset_index(drop=True)
     
-    # Assign the discovered row values as column names
-    df_cleaned.columns = df_cleaned.iloc[0]
+    # Set provisional columns to analyze the structural layout shape
+    df_cleaned.columns = [str(c).strip() for c in df_cleaned.iloc[0]]
     df_cleaned = df_cleaned[1:].reset_index(drop=True)
     
-    # 4. Clean up any corrupted columns (e.g., Unnamed columns or trailing completely empty spaces)
-    df_cleaned = df_cleaned.loc[:, df_cleaned.columns.notna()]
-    df_cleaned.columns = [str(c).strip() for c in df_cleaned.columns]
+    # Drop completely unparsed or empty structure segments
+    df_cleaned = df_cleaned.loc[:, df_cleaned.columns.notna() & (df_cleaned.columns != 'None') & (df_cleaned.columns != 'nan')]
     df_cleaned = df_cleaned.loc[:, ~df_cleaned.columns.str.startswith('Unnamed:')]
 
+    if df_cleaned.empty:
+        return df_cleaned, uploaded_file.name
+
+    # 3. Transposition Validation Check
+    # If the layout has very few columns (e.g., 2) but multiple rows, and the first column 
+    # consists entirely of distinct category names/keys, it's a transposed metadata block.
+    if df_cleaned.shape[1] == 2:
+        first_col_values = df_cleaned.iloc[:, 0].dropna().tolist()
+        unique_keys_count = len(set(first_col_values))
+        
+        # If the values in the first column are completely unique text keys, invert it
+        if unique_keys_count == len(first_col_values) and len(first_col_values) > 1:
+            # Transpose the dataframe structurally
+            df_transposed = df_cleaned.set_index(df_cleaned.columns[0]).T
+            df_transposed.columns.name = None
+            df_transposed = df_transposed.reset_index(drop=True)
+            
+            # Clean column headers post-inversion
+            df_transposed.columns = [str(c).strip() for c in df_transposed.columns]
+            return df_transposed, uploaded_file.name
+
     return df_cleaned, uploaded_file.name
-
-
-
-
-
-Detected columns:
-
-[
-0:"Fleet Group"
-1:"(All)"
-]
-Detected Schema
-{
-"Fleet Group":"categorical"
-"(All)":"categorical"
-}
-Dataset Analysis
-{
-"Dataset Summary":{
-"Rows":12
-"Columns":2
-"Missing Values":0
-"Duplicate Rows":1
-}
-"Numeric Analysis":{}
-"Categorical Analysis":{
-"Fleet Group":{
-"Unique Values":11
-"Top Category":"Aircraft Type Y/N"
-}
-"(All)":{
-"Unique Values":7
-"Top Category":"Y"
-}
-}
-"Date Analysis":{}
-"Outlier Analysis":{}
-}
-
