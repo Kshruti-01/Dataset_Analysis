@@ -1,194 +1,468 @@
 #!/usr/bin/env python3
 """
 Dataset Analyzer Platform
-A clean, robust framework for handling ultra-wide Excel sheets without 
-row truncation or column flipping.
 Run with: streamlit run app.py
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
+import plotly.express as px
 import io
 import chardet
-from typing import Tuple, Dict, Any, List
+from typing import Tuple, Dict, Any, List, Optional
 
-# 1. FORCE THE BACKEND NEVER TO TRUNCATE WIDE COLUMNS
 pd.set_option('display.max_columns', None)
-pd.set_option('display.width', None)
+pd.set_option('display.max_rows', None)
 
-# 2. CONFIGURE STREAMLIT FOR ULTRA-WIDE RESOLUTIONS
 st.set_page_config(
     page_title="Dataset Analyzer Platform",
     page_icon="📊",
-    layout="wide",  # Forces screen to span edge-to-edge
+    layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# 3. EMBED STYLING RULES FOR HORIZONTAL DISPLAY SAFETY
 st.markdown("""
 <style>
-    .main-header {
-        font-size: 2.5rem;
-        color: #1E88E5;
-        text-align: center;
-        margin-bottom: 1rem;
-    }
-    .sub-header {
-        font-size: 1.5rem;
-        color: #333;
-        margin-top: 1rem;
-        margin-bottom: 0.5rem;
-    }
-    .metric-card {
-        background-color: #e3f2fd;
-        padding: 1rem;
-        border-radius: 10px;
-        text-align: center;
-    }
-    /* Guarantee container forces horizontal scrolling instead of collapsing layout grid */
-    div[data-testid="stDataFrame"] {
-        width: 100% !important;
-        overflow-x: auto !important;
-    }
+    .main-header { font-size: 2.5rem; color: #1E88E5; text-align: center; margin-bottom: 1rem; }
+    .sub-header  { font-size: 1.5rem; color: #333; margin-top: 1rem; margin-bottom: 0.5rem; }
+    .insight-card { background-color: #f0f2f6; padding: 1rem; border-radius: 10px; margin: 0.5rem 0; }
+    .metric-card  { background-color: #e3f2fd; padding: 1rem; border-radius: 10px; text-align: center; }
+    div[data-testid="stDataFrame"] { width: 100% !important; overflow-x: auto !important; }
 </style>
 """, unsafe_allow_html=True)
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# SHEET SCORING — picks the best sheet in a multi-sheet Excel file
+# ──────────────────────────────────────────────────────────────────────────────
+
+def score_sheet(df_raw: pd.DataFrame) -> float:
+    """
+    Score a sheet on how likely it is to be a real data table.
+    Higher = better.
+
+    Penalises:
+    - Very few rows (pivot filter panels have < 15 rows)
+    - Very few columns
+    - Pivot-table tell-tales: '(All)', 'Column Labels', 'Row Labels'
+    Rewards:
+    - Many rows AND many columns
+    - A dense header row followed by dense data rows
+    """
+    if df_raw is None or df_raw.empty:
+        return -1.0
+
+    rows, cols = df_raw.shape
+
+    # Hard-reject tiny sheets (pivot slicers, parameter sheets)
+    if rows < 5 or cols < 3:
+        return -1.0
+
+    # Detect pivot-table fingerprints in the first 20 rows
+    pivot_markers = {"(all)", "column labels", "row labels", "grand total", "filter"}
+    flat_values = set(
+        str(v).strip().lower()
+        for v in df_raw.iloc[:20].values.flatten()
+        if pd.notna(v)
+    )
+    pivot_hits = len(flat_values & pivot_markers)
+    if pivot_hits >= 2:
+        return -1.0  # almost certainly a pivot sheet
+
+    # Score: reward density (filled cells) scaled by size
+    total_cells = rows * cols
+    filled_cells = df_raw.notna().sum().sum()
+    density = filled_cells / max(total_cells, 1)
+
+    # Reward wide + tall sheets
+    size_score = np.log1p(rows) * np.log1p(cols)
+
+    return density * size_score
+
+
+def find_best_sheet(raw_bytes: bytes, file_ext: str) -> Tuple[pd.DataFrame, str]:
+    """
+    For Excel: read ALL sheets, score each, return the best one's raw DataFrame
+    and its name.
+    For CSV: just return the single sheet.
+    """
+    if file_ext == "csv":
+        result = chardet.detect(raw_bytes)
+        encoding = result["encoding"] or "utf-8"
+        df_raw = pd.read_csv(io.BytesIO(raw_bytes), header=None,
+                             encoding=encoding, sep=None, engine="python")
+        return df_raw, "CSV"
+
+    # Excel — read every sheet
+    xl = pd.ExcelFile(io.BytesIO(raw_bytes))
+    sheet_names = xl.sheet_names
+
+    best_name = sheet_names[0]
+    best_score = -999.0
+    best_df = None
+
+    for name in sheet_names:
+        try:
+            df_sheet = xl.parse(name, header=None)
+            s = score_sheet(df_sheet)
+            if s > best_score:
+                best_score = s
+                best_name = name
+                best_df = df_sheet
+        except Exception:
+            continue
+
+    if best_df is None:
+        raise ValueError("Could not read any sheet from this Excel file.")
+
+    return best_df, best_name
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# HEADER DETECTION — finds which row is the real column-header row
+# ──────────────────────────────────────────────────────────────────────────────
+
+def find_header_row(df_raw: pd.DataFrame) -> int:
+    """
+    Scan the first 20 rows and return the index of the row most likely to be
+    the header. A header row:
+      - Has mostly string (non-numeric) values
+      - Has high non-null density
+      - Is followed by rows that have the same or fewer non-null cells
+        (i.e. it's near the top, not buried in data)
+    """
+    best_row = 0
+    best_score = -1.0
+
+    search_limit = min(20, len(df_raw))
+
+    for idx in range(search_limit):
+        row = df_raw.iloc[idx]
+        non_null = row.notna().sum()
+        if non_null == 0:
+            continue
+
+        # Count cells that look like strings (not purely numeric)
+        string_count = 0
+        for val in row:
+            if pd.isna(val):
+                continue
+            s = str(val).strip()
+            # A value is "string-like" if it can't be parsed as a plain number
+            try:
+                float(s.replace(",", "").replace("%", ""))
+                # It IS numeric — headers can have numeric-looking names though,
+                # so give half-credit
+                string_count += 0.3
+            except ValueError:
+                string_count += 1.0
+
+        # Normalise by total columns so wide sheets don't dominate unfairly
+        string_ratio = string_count / max(df_raw.shape[1], 1)
+        # Penalise rows deep in the file (headers are almost always in the top 5)
+        position_penalty = idx * 0.05
+        score = string_ratio - position_penalty
+
+        if score > best_score:
+            best_score = score
+            best_row = idx
+
+    return best_row
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# MAIN LOADER
+# ──────────────────────────────────────────────────────────────────────────────
+
+def load_dataset(uploaded_file) -> Tuple[pd.DataFrame, str, str]:
+    """
+    Returns (cleaned_df, sheet_name, filename).
+    Works for CSV and multi-sheet Excel files.
+    """
+    raw_bytes = uploaded_file.read()   # read once into memory — no seek issues
+    file_ext = uploaded_file.name.rsplit(".", 1)[-1].lower()
+
+    # Step 1: find the best sheet (handles pivot sheets, parameter sheets, etc.)
+    df_raw, sheet_name = find_best_sheet(raw_bytes, file_ext)
+
+    if df_raw is None or df_raw.empty:
+        raise ValueError("The selected sheet appears to be empty.")
+
+    # Step 2: find the real header row within that sheet
+    header_row_idx = find_header_row(df_raw)
+
+    # Step 3: build clean column names from that row
+    raw_headers = []
+    for col_pos in range(df_raw.shape[1]):
+        val = df_raw.iloc[header_row_idx, col_pos]
+        header_str = str(val).strip() if pd.notna(val) else ""
+        if header_str.lower() in ("nan", "none", "") or header_str.startswith("Unnamed:"):
+            raw_headers.append(f"Column_{col_pos + 1}")
+        else:
+            # Normalise whitespace / newlines in header names
+            header_str = " ".join(header_str.split())
+            raw_headers.append(header_str)
+
+    # Step 4: slice data below the header row
+    df = df_raw.iloc[header_row_idx + 1:].copy()
+    df.columns = raw_headers
+    df = df.reset_index(drop=True)
+
+    # Step 5: drop rows that are entirely empty
+    df = df.dropna(how="all")
+
+    # Step 6: drop columns whose name is still generic AND entirely empty
+    cols_to_drop = [
+        c for c in df.columns
+        if c.startswith("Column_") and df[c].isna().all()
+    ]
+    df.drop(columns=cols_to_drop, inplace=True)
+
+    return df, sheet_name, uploaded_file.name
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ANALYSIS CLASS
+# ──────────────────────────────────────────────────────────────────────────────
+
 class DatasetAnalyzer:
-    """Calculates dataset architecture configurations safely"""
-    def __init__(self, df: pd.DataFrame):
+    def __init__(self, df: pd.DataFrame, filename: str = ""):
         self.df = df
-        
+        self.filename = filename
+
     def get_basic_info(self) -> Dict[str, Any]:
         return {
             "rows": self.df.shape[0],
             "columns": self.df.shape[1],
-            "missing_values": self.df.isnull().sum().sum(),
-            "duplicates": self.df.duplicated().sum()
+            "memory_usage": self.df.memory_usage(deep=True).sum() / 1024 ** 2,
+            "duplicates": int(self.df.duplicated().sum()),
+            "missing_values": int(self.df.isnull().sum().sum()),
+            "missing_percentage": (
+                self.df.isnull().sum().sum()
+                / max(self.df.shape[0] * self.df.shape[1], 1)
+            ) * 100,
         }
-    
+
     def get_column_info(self) -> pd.DataFrame:
         col_info = []
         for col in self.df.columns:
-            sample_val = "NaN"
-            if len(self.df[col].dropna()) > 0:
-                sample_val = str(self.df[col].dropna().iloc[0])
-            
+            non_null = self.df[col].dropna()
+            sample_val = str(non_null.iloc[0]) if len(non_null) > 0 else "NaN"
             col_info.append({
-                "Column Name": col,
-                "Data Type": str(self.df[col].dtype),
-                "Unique Values": self.df[col].nunique(),
-                "Missing Values": self.df[col].isnull().sum(),
-                "Sample Value": sample_val
+                "Column": col,
+                "Type": str(self.df[col].dtype),
+                "Unique Values": int(self.df[col].nunique()),
+                "Missing Values": int(self.df[col].isnull().sum()),
+                "Missing %": round(
+                    self.df[col].isnull().sum() / max(len(self.df), 1) * 100, 2
+                ),
+                "Sample Value": sample_val,
             })
         return pd.DataFrame(col_info)
 
+    def get_numeric_stats(self) -> pd.DataFrame:
+        numeric_cols = self.df.select_dtypes(include=[np.number]).columns
+        if len(numeric_cols) > 0:
+            return self.df[numeric_cols].describe().T.round(2)
+        return pd.DataFrame()
 
-def load_dataset(uploaded_file) -> Tuple[pd.DataFrame, str]:
-    """
-    Scans the data matrix horizontally to find the row containing 
-    the largest amount of columns, completely ignoring top metadata filters.
-    """
-    file_extension = uploaded_file.name.split('.')[-1].lower()
-    
-    if file_extension == 'csv':
-        raw_data = uploaded_file.getvalue()
-        result = chardet.detect(raw_data)
-        encoding = result['encoding'] if result['encoding'] else 'utf-8'
-        df_raw = pd.read_csv(io.BytesIO(raw_data), encoding=encoding, header=None)
-    elif file_extension in ['xlsx', 'xls']:
-        df_raw = pd.read_excel(uploaded_file, header=None)
-    else:
-        raise ValueError(f"Unsupported file type: .{file_extension}")
-    
-    if df_raw is None or df_raw.empty:
-        return df_raw, uploaded_file.name
+    def detect_schema(self) -> Dict[str, Any]:
+        schema: Dict[str, Any] = {
+            "column_count": len(self.df.columns),
+            "row_count": len(self.df),
+            "columns": {},
+        }
+        for col in self.df.columns:
+            dtype = self.df[col].dtype
+            unique_count = int(self.df[col].nunique())
+            missing_count = int(self.df[col].isnull().sum())
+            total = len(self.df)
 
-    # 🎯 Find the exact row containing the wide table header index 
-    non_empty_counts = df_raw.notna().sum(axis=1).tolist()
-    true_header_idx = non_empty_counts.index(max(non_empty_counts))
-    
-    # Slice the table cleanly starting directly at that index
-    df_cleaned = df_raw.iloc[true_header_idx:].reset_index(drop=True)
-    
-    # Establish structural header mapping
-    raw_headers = []
-    for col_pos in range(df_cleaned.shape[1]):
-        val = df_cleaned.iloc[0, col_pos]
-        header_str = str(val).strip() if pd.notna(val) else ""
-        
-        if header_str.lower() in ['nan', 'none', ''] or header_str.startswith('Unnamed:'):
-            raw_headers.append(f"Column_{col_pos + 1}")
-        else:
-            raw_headers.append(header_str)
-            
-    df_cleaned.columns = raw_headers
-    df_cleaned = df_cleaned[1:].reset_index(drop=True)
-    df_cleaned = df_cleaned.dropna(how='all')
+            if pd.api.types.is_numeric_dtype(dtype):
+                col_type = "numeric"
+            elif "datetime" in str(dtype):
+                col_type = "datetime"
+            elif dtype == object:
+                col_type = "categorical" if (total > 0 and unique_count / total < 0.5) else "text"
+            else:
+                col_type = "other"
 
-    return df_cleaned, uploaded_file.name
+            raw_samples = self.df[col].dropna().head(3).tolist()
+            safe_samples = []
+            for v in raw_samples:
+                if isinstance(v, (np.integer,)):
+                    safe_samples.append(int(v))
+                elif isinstance(v, (np.floating,)):
+                    safe_samples.append(float(v))
+                else:
+                    safe_samples.append(str(v))
 
+            schema["columns"][col] = {
+                "data_type": str(dtype),
+                "unique_values": unique_count,
+                "missing_values": missing_count,
+                "column_type": col_type,
+                "sample_values": safe_samples,
+            }
+        return schema
+
+    def generate_insights(self) -> List[str]:
+        insights = []
+        info = self.get_basic_info()
+        insights.append(
+            f"📊 Dataset has **{info['rows']:,}** rows and **{info['columns']}** columns."
+        )
+        if info["missing_values"] > 0:
+            insights.append(
+                f"⚠️ **{info['missing_values']:,}** missing values "
+                f"({info['missing_percentage']:.1f}% of all cells)."
+            )
+        if info["duplicates"] > 0:
+            insights.append(f"🔁 **{info['duplicates']:,}** duplicate rows detected.")
+
+        numeric_cols = self.df.select_dtypes(include=[np.number]).columns.tolist()
+        cat_cols = self.df.select_dtypes(include=["object"]).columns.tolist()
+        insights.append(
+            f"📝 **{len(numeric_cols)}** numeric columns, **{len(cat_cols)}** text/categorical columns."
+        )
+
+        # Highlight high-missing columns
+        for col in self.df.columns:
+            pct = self.df[col].isnull().mean() * 100
+            if pct > 40:
+                insights.append(f"⚠️ Column **{col}** is {pct:.0f}% empty — consider dropping it.")
+
+        # Numeric range insights
+        for col in numeric_cols[:5]:
+            mn = self.df[col].min()
+            mx = self.df[col].max()
+            insights.append(f"📈 **{col}**: range {mn:,.2f} → {mx:,.2f}")
+
+        return insights
+
+    def create_visualizations(self) -> Dict[str, Any]:
+        plots = {}
+        numeric_cols = self.df.select_dtypes(include=[np.number]).columns.tolist()
+        if len(numeric_cols) >= 2:
+            corr = self.df[numeric_cols].corr()
+            plots["correlation"] = px.imshow(
+                corr, text_auto=".2f", aspect="auto",
+                title="Correlation Heatmap", color_continuous_scale="RdBu_r",
+                zmin=-1, zmax=1,
+            )
+        return plots
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# STREAMLIT APP
+# ──────────────────────────────────────────────────────────────────────────────
 
 def main():
     st.markdown('<div class="main-header">📊 Dataset Analyzer Platform</div>', unsafe_allow_html=True)
     st.markdown("---")
-    
+
     with st.sidebar:
         st.markdown("## 📂 Upload Dataset")
         uploaded_file = st.file_uploader(
             "Choose a file (CSV or Excel)",
-            type=['csv', 'xlsx', 'xls'],
-            key="file_uploader_widget"
+            type=["csv", "xlsx", "xls"],
+            key="file_uploader_widget",
         )
-        
-        # Clear out state configurations cleanly when file is unmounted
         if uploaded_file is None:
-            for k in ['current_df', 'current_file']:
-                if k in st.session_state: 
-                    del st.session_state[k]
-                
+            for k in ["current_df", "current_file", "original_df", "sheet_name"]:
+                st.session_state.pop(k, None)
+
     if uploaded_file is not None:
         try:
-            # Check for fresh execution updates
-            if 'current_df' not in st.session_state or st.session_state.current_file != uploaded_file.name:
-                with st.spinner("Extracting comprehensive column matrix..."):
-                    df, filename = load_dataset(uploaded_file)
+            if (
+                "current_df" not in st.session_state
+                or st.session_state.get("current_file") != uploaded_file.name
+            ):
+                with st.spinner("Detecting best sheet and parsing all columns..."):
+                    df, sheet_name, filename = load_dataset(uploaded_file)
                     st.session_state.current_df = df
                     st.session_state.current_file = filename
-            
+                    st.session_state.original_df = df.copy()
+                    st.session_state.sheet_name = sheet_name
+
             df = st.session_state.current_df
-            analyzer = DatasetAnalyzer(df)
-            basic_info = analyzer.get_basic_info()
-            
-            # Display high-level metrics
-            c1, c2, c3, c4 = st.columns(4)
-            c1.markdown(f'<div class="metric-card"><h3>{basic_info["rows"]:,}</h3><p>Rows</p></div>', unsafe_allow_html=True)
-            c2.markdown(f'<div class="metric-card"><h3>{basic_info["columns"]}</h3><p>Total Columns Detected</p></div>', unsafe_allow_html=True)
-            c3.markdown(f'<div class="metric-card"><h3>{basic_info["missing_values"]:,}</h3><p>Missing Cells</p></div>', unsafe_allow_html=True)
-            c4.markdown(f'<div class="metric-card"><h3>{basic_info["duplicates"]:,}</h3><p>Duplicate Rows</p></div>', unsafe_allow_html=True)
-            
-            st.markdown("---")
-            
-            tab1, tab2 = st.tabs(["📋 Dataset Preview", "🔍 Complete Column List"])
-            
+            sheet_name = st.session_state.get("sheet_name", "")
+            analyzer = DatasetAnalyzer(df, st.session_state.current_file)
+
+            # Show which sheet was auto-selected
+            st.success(
+                f"✅ Loaded **{df.shape[0]:,} rows × {df.shape[1]} columns** "
+                f"from sheet: **'{sheet_name}'**"
+            )
+
+            tab1, tab2, tab3, tab4 = st.tabs([
+                "📋 Dataset Overview",
+                "📈 Numeric Stats",
+                "🔍 Schema",
+                "💡 Insights & Charts",
+            ])
+
             with tab1:
-                st.markdown('<div class="sub-header">Dataset Preview</div>', unsafe_allow_html=True)
-                st.info("↔️ Use the horizontal scrollbar at the bottom of the table grid to browse all available layout columns.")
-                
-                # Render data with zero automated structural alterations or drop sequences
-                st.dataframe(df.head(100), use_container_width=True)
-                
+                st.markdown('<div class="sub-header">Dataset Overview</div>', unsafe_allow_html=True)
+                info = analyzer.get_basic_info()
+
+                c1, c2, c3, c4, c5 = st.columns(5)
+                c1.metric("Rows", f"{info['rows']:,}")
+                c2.metric("Columns", info["columns"])
+                c3.metric("Missing Cells", f"{info['missing_values']:,}")
+                c4.metric("Duplicates", info["duplicates"])
+                c5.metric("Memory (MB)", f"{info['memory_usage']:.2f}")
+
+                st.markdown("---")
+                st.markdown("### 📄 Data Preview — All Columns (scroll right →)")
+                st.dataframe(df.head(25), use_container_width=True)
+
+                st.markdown("### 📋 Complete Column Inventory")
+                st.dataframe(analyzer.get_column_info(), use_container_width=True)
+
             with tab2:
-                st.markdown('<div class="sub-header">Complete Column Inventory Tracking</div>', unsafe_allow_html=True)
-                col_info_df = analyzer.get_column_info()
-                st.dataframe(col_info_df, use_container_width=True)
-                    
+                st.markdown('<div class="sub-header">Numeric Statistics</div>', unsafe_allow_html=True)
+                stats = analyzer.get_numeric_stats()
+                if not stats.empty:
+                    st.dataframe(stats, use_container_width=True)
+                else:
+                    st.info("No numeric columns detected in this dataset.")
+
+            with tab3:
+                st.markdown('<div class="sub-header">Schema Parameters</div>', unsafe_allow_html=True)
+                schema = analyzer.detect_schema()
+                # Show as a clean table instead of raw JSON
+                schema_rows = [
+                    {
+                        "Column": col,
+                        "Detected Type": meta["column_type"],
+                        "Data Type": meta["data_type"],
+                        "Unique": meta["unique_values"],
+                        "Missing": meta["missing_values"],
+                        "Sample": ", ".join(str(s) for s in meta["sample_values"]),
+                    }
+                    for col, meta in schema["columns"].items()
+                ]
+                st.dataframe(pd.DataFrame(schema_rows), use_container_width=True)
+
+            with tab4:
+                st.markdown('<div class="sub-header">Automated Insights</div>', unsafe_allow_html=True)
+                for insight in analyzer.generate_insights():
+                    st.markdown(f'<div class="insight-card">{insight}</div>', unsafe_allow_html=True)
+
+                plots = analyzer.create_visualizations()
+                if "correlation" in plots:
+                    st.markdown("### 🔥 Correlation Heatmap")
+                    st.plotly_chart(plots["correlation"], use_container_width=True)
+                else:
+                    st.info("Need at least 2 numeric columns to show a correlation heatmap.")
+
         except Exception as e:
-            st.error(f"Processing Failure: {str(e)}")
-            st.info("Check whether your document has unclosed file stream hooks open locally inside Excel.")
+            st.error(f"❌ Error: {str(e)}")
+            st.exception(e)
     else:
-        st.info("👈 Please select and upload your data document asset in the sidebar container.")
+        st.info("👈 Upload a CSV or Excel file to begin analysis.")
 
 
 if __name__ == "__main__":
