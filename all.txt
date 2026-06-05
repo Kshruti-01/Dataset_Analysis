@@ -1,37 +1,31 @@
 #!/usr/bin/env python3
 """
 Dataset Analyzer Platform
-A comprehensive tool for dataset analysis, cleaning, and visualization.
+A clean, robust framework for handling ultra-wide Excel sheets without 
+row truncation or column flipping.
 Run with: streamlit run app.py
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import io
 import chardet
-from typing import Tuple, Dict, Any, List, Optional
-import re
+from typing import Tuple, Dict, Any, List
 
-# 🛠️ FORCE PANDAS TO NEVER HIDE COLUMNS OR ROWS IN THE BACKEND
+# 1. FORCE THE BACKEND NEVER TO TRUNCATE WIDE COLUMNS
 pd.set_option('display.max_columns', None)
-pd.set_option('display.max_rows', None)
 pd.set_option('display.width', None)
 
-# Page configuration
+# 2. CONFIGURE STREAMLIT FOR ULTRA-WIDE RESOLUTIONS
 st.set_page_config(
     page_title="Dataset Analyzer Platform",
     page_icon="📊",
-    layout="wide",  # Uses full screen width for ultra-wide tables
+    layout="wide",  # Forces screen to span edge-to-edge
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS to force horizontal scrolling and prevent truncation layout drops
+# 3. EMBED STYLING RULES FOR HORIZONTAL DISPLAY SAFETY
 st.markdown("""
 <style>
     .main-header {
@@ -46,19 +40,13 @@ st.markdown("""
         margin-top: 1rem;
         margin-bottom: 0.5rem;
     }
-    .insight-card {
-        background-color: #f0f2f6;
-        padding: 1rem;
-        border-radius: 10px;
-        margin: 0.5rem 0;
-    }
     .metric-card {
         background-color: #e3f2fd;
         padding: 1rem;
         border-radius: 10px;
         text-align: center;
     }
-    /* Force Streamlit Dataframe to allow complete wide horizontal extension */
+    /* Guarantee container forces horizontal scrolling instead of collapsing layout grid */
     div[data-testid="stDataFrame"] {
         width: 100% !important;
         overflow-x: auto !important;
@@ -68,21 +56,16 @@ st.markdown("""
 
 
 class DatasetAnalyzer:
-    """Main class for dataset analysis operations"""
-    
-    def __init__(self, df: pd.DataFrame, filename: str = ""):
+    """Calculates dataset architecture configurations safely"""
+    def __init__(self, df: pd.DataFrame):
         self.df = df
-        self.filename = filename
-        self.insights = []
         
     def get_basic_info(self) -> Dict[str, Any]:
         return {
             "rows": self.df.shape[0],
             "columns": self.df.shape[1],
-            "memory_usage": self.df.memory_usage(deep=False).sum() / 1024**2,  # MB
-            "duplicates": self.df.duplicated().sum(),
             "missing_values": self.df.isnull().sum().sum(),
-            "missing_percentage": (self.df.isnull().sum().sum() / (self.df.shape[0] * self.df.shape[1])) * 100 if self.df.shape[0] > 0 else 0
+            "duplicates": self.df.duplicated().sum()
         }
     
     def get_column_info(self) -> pd.DataFrame:
@@ -93,107 +76,19 @@ class DatasetAnalyzer:
                 sample_val = str(self.df[col].dropna().iloc[0])
             
             col_info.append({
-                "Column": col,
-                "Type": str(self.df[col].dtype),
+                "Column Name": col,
+                "Data Type": str(self.df[col].dtype),
                 "Unique Values": self.df[col].nunique(),
                 "Missing Values": self.df[col].isnull().sum(),
-                "Missing %": round((self.df[col].isnull().sum() / len(self.df)) * 100, 2) if len(self.df) > 0 else 0,
                 "Sample Value": sample_val
             })
         return pd.DataFrame(col_info)
-    
-    def get_numeric_stats(self) -> pd.DataFrame:
-        numeric_cols = self.df.select_dtypes(include=[np.number]).columns
-        if len(numeric_cols) > 0:
-            return self.df[numeric_cols].describe().T
-        return pd.DataFrame()
-    
-    def detect_schema(self) -> Dict[str, Any]:
-        schema = {
-            "column_count": len(self.df.columns),
-            "row_count": len(self.df),
-            "columns": {}
-        }
-        for col in self.df.columns:
-            dtype = self.df[col].dtype
-            unique_count = self.df[col].nunique()
-            missing_count = self.df[col].isnull().sum()
-            
-            if dtype in ['int64', 'float64']:
-                col_type = "numeric"
-            elif dtype == 'object':
-                if len(self.df) > 0 and (unique_count / len(self.df) < 0.05):
-                    col_type = "categorical"
-                else:
-                    col_type = "text"
-            elif 'datetime' in str(dtype):
-                col_type = "datetime"
-            else:
-                col_type = "other"
-            
-            raw_samples = self.df[col].dropna().head(3).tolist()
-            safe_samples = []
-            for val in raw_samples:
-                if isinstance(val, (np.integer, np.int64)):
-                    safe_samples.append(int(val))
-                elif isinstance(val, (np.floating, np.float64)):
-                    safe_samples.append(float(val))
-                else:
-                    safe_samples.append(str(val))
-            
-            schema["columns"][col] = {
-                "data_type": str(dtype),
-                "unique_values": int(unique_count),
-                "missing_values": int(missing_count),
-                "column_type": col_type,
-                "sample_values": safe_samples
-            }
-        return schema
-    
-    def generate_insights(self) -> List[str]:
-        insights = []
-        basic_info = self.get_basic_info()
-        insights.append(f"📊 Dataset contains **{basic_info['rows']:,}** rows and **{basic_info['columns']}** columns.")
-        
-        if basic_info['missing_values'] > 0:
-            insights.append(f"⚠️ Found **{basic_info['missing_values']:,}** missing values ({basic_info['missing_percentage']:.1f}% of total data).")
-        
-        numeric_cols = self.df.select_dtypes(include=[np.number]).columns.tolist()
-        categorical_cols = self.df.select_dtypes(include=['object']).columns.tolist()
-        insights.append(f"📝 Contains **{len(numeric_cols)}** numeric columns and **{len(categorical_cols)}** categorical columns.")
-        
-        return insights
-
-    def create_visualizations(self) -> Dict[str, Any]:
-        plots = {}
-        numeric_cols = self.df.select_dtypes(include=[np.number]).columns.tolist()
-        if len(numeric_cols) >= 2:
-            corr_matrix = self.df[numeric_cols].corr()
-            fig = px.imshow(
-                corr_matrix, text_auto=True, aspect="auto",
-                title="Correlation Heatmap", color_continuous_scale="RdBu_r"
-            )
-            plots["correlation"] = fig
-        return plots
-
-
-class DataCleaner:
-    """Handles data cleaning operations"""
-    @staticmethod
-    def remove_duplicates(df: pd.DataFrame) -> pd.DataFrame:
-        return df.drop_duplicates()
-    
-    @staticmethod
-    def handle_missing_values(df: pd.DataFrame, strategy: str = "drop") -> pd.DataFrame:
-        if strategy == "drop":
-            return df.dropna()
-        return df
 
 
 def load_dataset(uploaded_file) -> Tuple[pd.DataFrame, str]:
     """
-    Smart layout scanning matrix parser. Locates the widest row to capture
-    every single horizontal structural column block (A to CY).
+    Scans the data matrix horizontally to find the row containing 
+    the largest amount of columns, completely ignoring top metadata filters.
     """
     file_extension = uploaded_file.name.split('.')[-1].lower()
     
@@ -210,13 +105,14 @@ def load_dataset(uploaded_file) -> Tuple[pd.DataFrame, str]:
     if df_raw is None or df_raw.empty:
         return df_raw, uploaded_file.name
 
-    # 🎯 SCANNING AXIS: Find the row that holds the actual complete horizontal table headers
+    # 🎯 Find the exact row containing the wide table header index 
     non_empty_counts = df_raw.notna().sum(axis=1).tolist()
     true_header_idx = non_empty_counts.index(max(non_empty_counts))
     
+    # Slice the table cleanly starting directly at that index
     df_cleaned = df_raw.iloc[true_header_idx:].reset_index(drop=True)
     
-    # Extract headers cleanly across all available dimensions
+    # Establish structural header mapping
     raw_headers = []
     for col_pos in range(df_cleaned.shape[1]):
         val = df_cleaned.iloc[0, col_pos]
@@ -246,58 +142,53 @@ def main():
             key="file_uploader_widget"
         )
         
+        # Clear out state configurations cleanly when file is unmounted
         if uploaded_file is None:
-            for k in ['current_df', 'current_file', 'original_df']:
-                if k in st.session_state: del st.session_state[k]
+            for k in ['current_df', 'current_file']:
+                if k in st.session_state: 
+                    del st.session_state[k]
                 
     if uploaded_file is not None:
         try:
+            # Check for fresh execution updates
             if 'current_df' not in st.session_state or st.session_state.current_file != uploaded_file.name:
-                with st.spinner("Parsing all columns freshly..."):
+                with st.spinner("Extracting comprehensive column matrix..."):
                     df, filename = load_dataset(uploaded_file)
                     st.session_state.current_df = df
                     st.session_state.current_file = filename
-                    st.session_state.original_df = df.copy()
             
             df = st.session_state.current_df
-            analyzer = DatasetAnalyzer(df, st.session_state.current_file)
+            analyzer = DatasetAnalyzer(df)
+            basic_info = analyzer.get_basic_info()
             
-            tab1, tab2, tab3 = st.tabs(["📋 Dataset Overview", "🔍 Schema Tracking", "💡 Insights"])
+            # Display high-level metrics
+            c1, c2, c3, c4 = st.columns(4)
+            c1.markdown(f'<div class="metric-card"><h3>{basic_info["rows"]:,}</h3><p>Rows</p></div>', unsafe_allow_html=True)
+            c2.markdown(f'<div class="metric-card"><h3>{basic_info["columns"]}</h3><p>Total Columns Detected</p></div>', unsafe_allow_html=True)
+            c3.markdown(f'<div class="metric-card"><h3>{basic_info["missing_values"]:,}</h3><p>Missing Cells</p></div>', unsafe_allow_html=True)
+            c4.markdown(f'<div class="metric-card"><h3>{basic_info["duplicates"]:,}</h3><p>Duplicate Rows</p></div>', unsafe_allow_html=True)
+            
+            st.markdown("---")
+            
+            tab1, tab2 = st.tabs(["📋 Dataset Preview", "🔍 Complete Column List"])
             
             with tab1:
-                st.markdown('<div class="sub-header">Dataset Overview</div>', unsafe_allow_html=True)
-                basic_info = analyzer.get_basic_info()
+                st.markdown('<div class="sub-header">Dataset Preview</div>', unsafe_allow_html=True)
+                st.info("↔️ Use the horizontal scrollbar at the bottom of the table grid to browse all available layout columns.")
                 
-                c1, c2, c3, c4 = st.columns(4)
-                c1.markdown(f'<div class="metric-card"><h3>{basic_info["rows"]:,}</h3><p>Rows</p></div>', unsafe_allow_html=True)
-                c2.markdown(f'<div class="metric-card"><h3>{basic_info["columns"]}</h3><p>Columns Detected</p></div>', unsafe_allow_html=True)
-                c3.markdown(f'<div class="metric-card"><h3>{basic_info["missing_values"]:,}</h3><p>Missing Cells</p></div>', unsafe_allow_html=True)
-                c4.markdown(f'<div class="metric-card"><h3>{basic_info["duplicates"]:,}</h3><p>Duplicates</p></div>', unsafe_allow_html=True)
-                
-                st.markdown("---")
-                st.markdown("### 📄 Data Preview (Scroll Horizontally to View All Columns)")
-                
-                # 🚀 FORCE DISPLAY OF EVERY SINGLE COLUMN WITHOUT DROPS
-                st.dataframe(df.head(25), use_container_width=True)
-                
-                st.markdown("### 📋 Complete Column Inventory List")
-                col_info_df = analyzer.get_column_info()
-                st.dataframe(col_info_df, use_container_width=True)
+                # Render data with zero automated structural alterations or drop sequences
+                st.dataframe(df.head(100), use_container_width=True)
                 
             with tab2:
-                st.markdown('<div class="sub-header">Schema Parameters</div>', unsafe_allow_html=True)
-                schema = analyzer.detect_schema()
-                st.json(schema)
-                
-            with tab3:
-                st.markdown('<div class="sub-header">Automated Discovery</div>', unsafe_allow_html=True)
-                for insight in analyzer.generate_insights():
-                    st.markdown(f'<div class="insight-card">{insight}</div>', unsafe_allow_html=True)
+                st.markdown('<div class="sub-header">Complete Column Inventory Tracking</div>', unsafe_allow_html=True)
+                col_info_df = analyzer.get_column_info()
+                st.dataframe(col_info_df, use_container_width=True)
                     
         except Exception as e:
-            st.error(f"Execution Error: {str(e)}")
+            st.error(f"Processing Failure: {str(e)}")
+            st.info("Check whether your document has unclosed file stream hooks open locally inside Excel.")
     else:
-        st.info("👈 Please upload your wide Excel/CSV dataset to render columns.")
+        st.info("👈 Please select and upload your data document asset in the sidebar container.")
 
 
 if __name__ == "__main__":
